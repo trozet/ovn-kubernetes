@@ -2,6 +2,8 @@
 
 set -euxo pipefail
 
+K8S_VERSION=${K8S_VERSION:-v1.16.4}
+
 # Detect IP to use as API server
 API_IP=$(ip -4 addr | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v "127.0.0.1" | head -n 1)
 if [ -z "$API_IP" ]; then
@@ -12,12 +14,12 @@ fi
 sed -i "s/apiServerAddress.*/apiServerAddress: ${API_IP}/" kind.yaml
 
 # Create KIND cluster
-kind create cluster --name ovn --kubeconfig ${HOME}/admin.conf --image kindest/node:v1.16.4 --config=./kind.yaml
+kind create cluster --name ovn --kubeconfig ${HOME}/admin.conf --image kindest/node:${K8S_VERSION} --config=./kind.yaml
 export KUBECONFIG=${HOME}/admin.conf
 mkdir -p /tmp/kind
 sudo chmod 777 /tmp/kind
-echo $(kubectl get secrets -o jsonpath='{.items[].data.ca\.crt}') > /tmp/kind/ca.crt
-echo $(kubectl get secrets -o jsonpath='{.items[].data.token}') > /tmp/kind/token
+kubectl get secrets -o jsonpath='{.items[].data.ca\.crt}' > /tmp/kind/ca.crt
+kubectl get secrets -o jsonpath='{.items[].data.token}' > /tmp/kind/token
 pushd ../go-controller
 make
 popd

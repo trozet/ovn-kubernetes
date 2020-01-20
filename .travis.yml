@@ -2,6 +2,10 @@ sudo: required
 language: go
 go:
       - "1.12.15"
+env:
+  global:
+    - K8S_VERSION=v1.16.4
+
 before_install:
     - export GOPATH=$HOME/go
     - export PATH=$HOME/usr/local/go/bin:$GOPATH/bin:$PATH
@@ -31,7 +35,7 @@ jobs:
         - pushd $GOPATH/src/k8s.io/test-infra/kubetest
         - go install
         - popd
-        - git clone --single-branch --branch v1.16.4 https://github.com/kubernetes/kubernetes.git $GOPATH/src/k8s.io/kubernetes/
+        - git clone --single-branch --branch $K8S_VERSION https://github.com/kubernetes/kubernetes.git $GOPATH/src/k8s.io/kubernetes/
         - pushd $GOPATH/src/k8s.io/kubernetes/
         - make WHAT="test/e2e/e2e.test vendor/github.com/onsi/ginkgo/ginkgo cmd/kubectl"
         - sudo cp ./_output/local/go/bin/kubectl /usr/local/bin/
@@ -39,12 +43,12 @@ jobs:
       script:
         - GO111MODULE="on" go get sigs.k8s.io/kind@v0.7.0
         - pushd contrib
-        - ./kind.sh
+        - ./kind.sh $K8S_VERSION
         - popd
         - pushd $GOPATH/src/k8s.io/kubernetes/
         - export KUBERNETES_CONFORMANCE_TEST=y
         - export KUBECONFIG=${HOME}/admin.conf
-        - kubetest --provider=local --deployment=kind --kind-cluster-name=kind-ovn --test --test_args='--ginkgo.focus=\[sig-network\].*Conformance --num-nodes=3'
+        - kubetest --provider=local --deployment=kind --kind-cluster-name=kind-ovn --test --test_args='--ginkgo.focus=\[sig-network\] --num-nodes=3'
       after_failure:
         - kind export logs /tmp/kind/logs
         - tar -czvf e2e-kind-ovn-${TRAVIS_COMMIT}-${TRAVIS_JOB_NUMBER}.tar.gz -C /tmp/kind/logs/ ./
