@@ -30,9 +30,10 @@ docker build -t ovn-daemonset-f:dev -f Dockerfile.fedora .
 docker save ovn-daemonset-f:dev -o /tmp/kind/image.tar.gz
 ./daemonset.sh --image=docker.io/library/ovn-daemonset-f:dev --net-cidr=10.244.0.0/16 --svc-cidr=10.96.0.0/12 --gateway-mode="local" --k8s-apiserver=https://${API_IP}:11337
 popd
-for container in $(docker ps  | grep kindest/node | awk '{print $NF}'); do 
-  docker exec $container ctr --namespace=k8s.io images import /var/run/secrets/kubernetes.io/serviceaccount/image.tar.gz
-done
+kind load docker-image ovn-daemonset-f:dev --name ovn
+#for container in $(docker ps  | grep kindest/node | awk '{print $NF}'); do 
+#  docker exec $container ctr --namespace=k8s.io images import /var/run/secrets/kubernetes.io/serviceaccount/image.tar.gz
+#done
 pushd ../dist/yaml
 kubectl create -f ovn-setup.yaml
 kubectl create -f ovnkube-db.yaml
