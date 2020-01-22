@@ -18,6 +18,17 @@ kind create cluster --name ovn --kubeconfig ${HOME}/admin.conf --image kindest/n
 export KUBECONFIG=${HOME}/admin.conf
 mkdir -p /tmp/kind
 sudo chmod 777 /tmp/kind
+count=0
+until kubectl get secrets -o jsonpath='{.items[].data.ca\.crt}'
+do
+  if [ $count -gt 10 ]; then
+    echo "Failed to get k8s crt/token"
+    exit 1
+  fi
+  count=$((count+1))
+  echo "secrets not availble on attempt $count"
+  sleep 5
+done
 kubectl get secrets -o jsonpath='{.items[].data.ca\.crt}' > /tmp/kind/ca.crt
 kubectl get secrets -o jsonpath='{.items[].data.token}' > /tmp/kind/token
 pushd ../go-controller
@@ -30,9 +41,6 @@ docker build -t ovn-daemonset-f:dev -f Dockerfile.fedora .
 ./daemonset.sh --image=docker.io/library/ovn-daemonset-f:dev --net-cidr=10.244.0.0/16 --svc-cidr=10.96.0.0/12 --gateway-mode="local" --k8s-apiserver=https://${API_IP}:11337
 popd
 kind load docker-image ovn-daemonset-f:dev --name ovn
-#for container in $(docker ps  | grep kindest/node | awk '{print $NF}'); do 
-#  docker exec $container ctr --namespace=k8s.io images import /var/run/secrets/kubernetes.io/serviceaccount/image.tar.gz
-#done
 pushd ../dist/yaml
 kubectl create -f ovn-setup.yaml
 kubectl create -f ovnkube-db.yaml
