@@ -15,15 +15,18 @@ USER root
 
 ENV PYTHONDONTWRITEBYTECODE yes
 
+COPY ovn-2.12.90-1.fc30.x86_64.rpm ovn-central-2.12.90-1.fc30.x86_64.rpm ovn-host-2.12.90-1.fc30.x86_64.rpm ./
+
 # install needed rpms - openvswitch must be 2.10.4 or higher
 RUN INSTALL_PKGS=" \
 	PyYAML bind-utils procps-ng openssl numactl-libs firewalld-filesystem \
 	libpcap hostname kubernetes-client \
-        ovn ovn-central ovn-host \
 	iptables iproute strace socat \
         " && \
-	dnf install --refresh -y --setopt=tsflags=nodocs $INSTALL_PKGS && \
-	dnf clean all && rm -rf /var/cache/dnf/*
+	dnf install --refresh -y --setopt=tsflags=nodocs $INSTALL_PKGS
+
+RUN dnf install -y ./ovn-2.12.90-1.fc30.x86_64.rpm ./ovn-central-2.12.90-1.fc30.x86_64.rpm ./ovn-host-2.12.90-1.fc30.x86_64.rpm
+RUN dnf clean all && rm -rf /var/cache/dnf/*
 
 RUN mkdir -p /var/run/openvswitch && \
     mkdir -p /usr/libexec/cni/
