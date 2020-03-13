@@ -47,6 +47,7 @@ var (
 		InactivityProbe:   100000, // in Milliseconds
 		OpenFlowProbe:     180,    // in Seconds
 		RawClusterSubnets: "10.128.0.0/14/23",
+		OVNResyncTimer:    30,
 	}
 
 	// Logging holds logging-related parsed config file parameters and command-line overrides
@@ -136,6 +137,8 @@ type DefaultConfig struct {
 	// ClusterSubnets holds parsed cluster subnet entries and may be used
 	// outside the config module.
 	ClusterSubnets []CIDRNetworkEntry
+	// OVNResyncTimer is the periodic timer value used to force ovn-controller to recompute flows
+	OVNResyncTimer int64 `gcfg:"ovn-controller-resync-timer"`
 }
 
 // LoggingConfig holds logging-related parsed config file parameters and command-line overrides
@@ -470,6 +473,12 @@ var CommonFlags = []cli.Flag{
 		Name:        "logfile",
 		Usage:       "path of a file to direct log output to",
 		Destination: &cliConfig.Logging.File,
+	},
+	cli.Int64Flag{
+		Name:        "ovn-controller-resync-timer",
+		Usage:       "Periodic timer setting in seconds for ovn-controller to force recomputing flows (default 30)",
+		Destination: &cliConfig.Default.OVNResyncTimer,
+		Value:       Default.OVNResyncTimer,
 	},
 }
 

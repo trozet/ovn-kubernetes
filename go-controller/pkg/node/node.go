@@ -234,6 +234,18 @@ func (n *OvnNode) Start() error {
 		return err
 	}
 
+	// force recompute of flows for ovn-controller periodically
+	go func() {
+		klog.Info("OVN-Controller resync thread started")
+		for {
+			_, stderr, err := util.RunOVNControllerAppCtl(" recompute")
+			if err != nil {
+				klog.Errorf("Failed to force ovn-controller flow re-computation: %s, %v", stderr, err)
+			}
+			time.Sleep(time.Duration(config.Default.OVNResyncTimer) * time.Second)
+		}
+	}()
+
 	nodeAnnotator := kube.NewNodeAnnotator(n.Kube, node)
 	waiter := newStartupWaiter(n.name)
 
