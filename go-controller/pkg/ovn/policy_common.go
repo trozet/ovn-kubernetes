@@ -423,10 +423,10 @@ func (oc *Controller) watchPods(policy *knet.NetworkPolicy, np *namespacePolicy,
 func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespacePolicy, gressPolicies []*gressPolicy, modifyFn peerNamespaceSelectorModifyFn) {
 	_, err := oc.watchFactory.AddNamespaceHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
+			namespace := obj.(*kapi.Namespace)
 			for _, gress := range gressPolicies {
 				for _, clause := range gress.clauses {
 					if clause.namespaceSelector != nil && clause.podSelector != nil {
-						namespace := obj.(*kapi.Namespace)
 						namespaceSel, err := metav1.LabelSelectorAsSelector(clause.namespaceSelector)
 						if err != nil {
 							klog.Errorf("Error creating label selector")
@@ -449,7 +449,6 @@ func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespaceP
 						}
 
 					} else if clause.namespaceSelector != nil {
-						namespace := obj.(*kapi.Namespace)
 						namespaceSel, err := metav1.LabelSelectorAsSelector(clause.namespaceSelector)
 						if err != nil {
 							klog.Errorf("error creating label selector")
@@ -476,10 +475,10 @@ func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespaceP
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
+			namespace := obj.(*kapi.Namespace)
 			for _, gress := range gressPolicies {
 				for _, clause := range gress.clauses {
 					if clause.namespaceSelector != nil && clause.podSelector != nil {
-						namespace := obj.(*kapi.Namespace)
 						namespaceSel, err := metav1.LabelSelectorAsSelector(clause.namespaceSelector)
 						if err != nil {
 							klog.Errorf("Error creating label selector")
@@ -504,7 +503,6 @@ func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespaceP
 							}
 						}
 					} else if clause.namespaceSelector != nil {
-						namespace := obj.(*kapi.Namespace)
 						namespaceSel, err := metav1.LabelSelectorAsSelector(clause.namespaceSelector)
 						if err != nil {
 							klog.Errorf("error creating label selector")
