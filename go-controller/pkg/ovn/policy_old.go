@@ -706,6 +706,9 @@ func (oc *Controller) addNetworkPolicyOld(policy *knet.NetworkPolicy) {
 			hashedLocalAddressSet = hashedAddressSet(localPeerPods)
 			createAddressSet(localPeerPods, hashedLocalAddressSet, nil)
 			ingress.addAddressSet(hashedLocalAddressSet)
+
+			ingress.hashedLocalAddressSet = hashedLocalAddressSet
+			ingress.peerPodAddressMap = peerPodAddressMap
 		}
 
 		for _, fromJSON := range ingressJSON.From {
@@ -713,30 +716,13 @@ func (oc *Controller) addNetworkPolicyOld(policy *knet.NetworkPolicy) {
 			if fromJSON.IPBlock != nil {
 				ingress.addIPBlock(fromJSON.IPBlock)
 			}
-
-			if fromJSON.NamespaceSelector != nil && fromJSON.PodSelector != nil {
-				// For each rule that contains both peer namespace selector and
-				// peer pod selector, we create a watcher for each matching namespace
-				// that populates the addressSet
-				oc.handlePeerNamespaceAndPodSelector(policy, ingress,
-					fromJSON.NamespaceSelector, fromJSON.PodSelector,
-					hashedLocalAddressSet, peerPodAddressMap, np)
-
-			} else if fromJSON.NamespaceSelector != nil {
-				// For each peer namespace selector, we create a watcher that
-				// populates ingress.peerAddressSets
-				oc.handlePeerNamespaceSelector(policy,
-					fromJSON.NamespaceSelector, ingress, np,
-					oc.handlePeerNamespaceSelectorModifyOld)
-			} else if fromJSON.PodSelector != nil {
-				// For each peer pod selector, we create a watcher that
-				// populates the addressSet
-				oc.handlePeerPodSelector(policy, fromJSON.PodSelector,
-					hashedLocalAddressSet, peerPodAddressMap, np)
-			}
+			ingress.clauses = append(ingress.clauses, &clause{fromJSON.NamespaceSelector, fromJSON.PodSelector})
 		}
 		np.ingressPolicies = append(np.ingressPolicies, ingress)
 	}
+
+	oc.watchPods(policy, np, np.ingressPolicies)
+	oc.watchNamespaces(policy, np, np.ingressPolicies, oc.handlePeerNamespaceSelectorModifyOld)
 
 	// Go through each egress rule.  For each egress rule, create an
 	// addressSet for the peer pods.
@@ -763,6 +749,9 @@ func (oc *Controller) addNetworkPolicyOld(policy *knet.NetworkPolicy) {
 			hashedLocalAddressSet = hashedAddressSet(localPeerPods)
 			createAddressSet(localPeerPods, hashedLocalAddressSet, nil)
 			egress.addAddressSet(hashedLocalAddressSet)
+
+			egress.hashedLocalAddressSet = hashedLocalAddressSet
+			egress.peerPodAddressMap = peerPodAddressMap
 		}
 
 		for _, toJSON := range egressJSON.To {
@@ -770,29 +759,14 @@ func (oc *Controller) addNetworkPolicyOld(policy *knet.NetworkPolicy) {
 			if toJSON.IPBlock != nil {
 				egress.addIPBlock(toJSON.IPBlock)
 			}
+			egress.clauses = append(egress.clauses, &clause{toJSON.NamespaceSelector, toJSON.PodSelector})
 
-			if toJSON.NamespaceSelector != nil && toJSON.PodSelector != nil {
-				// For each rule that contains both peer namespace selector and
-				// peer pod selector, we create a watcher for each matching namespace
-				// that populates the addressSet
-				oc.handlePeerNamespaceAndPodSelector(policy, egress,
-					toJSON.NamespaceSelector, toJSON.PodSelector,
-					hashedLocalAddressSet, peerPodAddressMap, np)
-			} else if toJSON.NamespaceSelector != nil {
-				// For each peer namespace selector, we create a watcher that
-				// populates egress.peerAddressSets
-				oc.handlePeerNamespaceSelector(policy,
-					toJSON.NamespaceSelector, egress, np,
-					oc.handlePeerNamespaceSelectorModifyOld)
-			} else if toJSON.PodSelector != nil {
-				// For each peer pod selector, we create a watcher that
-				// populates the addressSet
-				oc.handlePeerPodSelector(policy, toJSON.PodSelector,
-					hashedLocalAddressSet, peerPodAddressMap, np)
-			}
 		}
 		np.egressPolicies = append(np.egressPolicies, egress)
 	}
+
+	oc.watchPods(policy, np, np.egressPolicies)
+	oc.watchNamespaces(policy, np, np.egressPolicies, oc.handlePeerNamespaceSelectorModify)
 
 	oc.namespacePolicies[policy.Namespace][policy.Name] = np
 
