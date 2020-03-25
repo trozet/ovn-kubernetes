@@ -766,7 +766,7 @@ func (oc *Controller) addNetworkPolicyOld(policy *knet.NetworkPolicy) {
 	}
 
 	oc.watchPods(policy, np, np.egressPolicies)
-	oc.watchNamespaces(policy, np, np.egressPolicies, oc.handlePeerNamespaceSelectorModify)
+	oc.watchNamespaces(policy, np, np.egressPolicies, oc.handlePeerNamespaceSelectorModifyOld)
 
 	oc.namespacePolicies[policy.Namespace][policy.Name] = np
 

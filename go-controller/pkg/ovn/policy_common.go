@@ -518,6 +518,7 @@ func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespaceP
 							if removed {
 								modifyFn(gress, np, oldL3Match, newL3Match)
 							}
+							np.Unlock()
 						}
 					} else if clause.podSelector != nil {
 						// changes to a namespace will not affect clause that only selects on pods
