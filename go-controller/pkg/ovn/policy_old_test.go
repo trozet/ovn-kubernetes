@@ -922,7 +922,7 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 
 				_, err := fakeOvn.fakeClient.NetworkingV1().NetworkPolicies(networkPolicy.Namespace).Get(networkPolicy.Name, metav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
-				Eventually(fExec.CalledMatchesExpected).Should(BeTrue(), fExec.ErrorDesc)
+				Eventually(fExec.CalledMatchesExpected, 2).Should(BeTrue(), fExec.ErrorDesc)
 
 				nPodTest.delCmds(fExec)
 				npTest.delPodCmds(fExec, nPodTest, networkPolicy)
