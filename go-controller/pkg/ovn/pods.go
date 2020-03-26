@@ -352,10 +352,6 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) error {
 		}
 	}
 
-	if err := oc.addPodToNamespace(pod.Namespace, portInfo); err != nil {
-		return err
-	}
-
 	if annotation == nil {
 		routes, gwIP, err := getRoutesGatewayIP(pod, gatewayCIDR)
 		if err != nil {
@@ -379,6 +375,10 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) error {
 
 		// observe the pod creation latency metric.
 		metrics.RecordPodCreated(pod)
+	}
+
+	if err := oc.addPodToNamespace(pod.Namespace, portInfo); err != nil {
+		return err
 	}
 
 	return nil
