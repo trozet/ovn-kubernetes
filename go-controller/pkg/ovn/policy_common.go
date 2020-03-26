@@ -487,7 +487,7 @@ func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespaceP
 							}
 							np.Unlock()
 						} else {
-							klog.Warningf("NS SELECTOR NO MATCH watchNS: %v",namespaceSel, namespace.Labels)
+							klog.Warningf("NS SELECTOR NO MATCH watchNS: %v, %v",namespaceSel, namespace.Labels)
 						}
 					} else if clause.podSelector != nil {
 						klog.Infof("POD selector in watchNS: %v", clause.podSelector)
