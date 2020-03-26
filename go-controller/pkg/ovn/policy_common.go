@@ -311,6 +311,8 @@ func (oc *Controller) watchPods(policy *knet.NetworkPolicy, np *namespacePolicy,
 						}
 						if match {
 							oc.handlePeerPodSelectorAddUpdate(np, gress.peerPodAddressMap, gress.hashedLocalAddressSet, obj)
+						} else {
+							klog.Warningf("DID NOT MATCH: %v, %v,%v,%v", np, gress.peerPodAddressMap, gress.hashedLocalAddressSet, obj)
 						}
 					} else if clause.namespaceSelector != nil {
 						// Changes to a pod should not affect policies that only select on namespaces
