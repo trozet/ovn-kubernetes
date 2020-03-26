@@ -598,7 +598,6 @@ func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespaceP
 							if added {
 								modifyFn(gress, np, oldL3Match, newL3Match)
 							}
-							np.Unlock()
 						} else if !namespaceSel.Matches(labels.Set(newNamespace.Labels)) &&
 							namespaceSel.Matches(labels.Set(oldNamespace.Labels)) {
 							np.Lock()
