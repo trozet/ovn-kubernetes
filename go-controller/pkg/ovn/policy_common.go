@@ -302,7 +302,9 @@ func (oc *Controller) watchPods(policy *knet.NetworkPolicy, np *namespacePolicy,
 			pod := obj.(*kapi.Pod)
 			klog.Infof("IN ADD POD FOR NP: %v, %v, %v", policy, np, gressPolicies)
 			for _, gress := range gressPolicies {
+				klog.Infof("IN GRESS policies: %v", gress)
 				for _, clause := range gress.clauses {
+					klog.Infof("In clauses: %v", clause)
 					if clause.namespaceSelector != nil && clause.podSelector != nil {
 						//pod and namespace selector are being used
 						match, err := oc.matchNamespaceSelectorAndPodSelector(obj, clause.podSelector, clause.namespaceSelector)
@@ -317,9 +319,11 @@ func (oc *Controller) watchPods(policy *knet.NetworkPolicy, np *namespacePolicy,
 							klog.Warningf("DID NOT MATCH: %v, %v,%v,%v", np, gress.peerPodAddressMap, gress.hashedLocalAddressSet, obj)
 						}
 					} else if clause.namespaceSelector != nil {
+						klog.Infof("NS selector in watchPods: %v", clause.namespaceSelector)
 						// Changes to a pod should not affect policies that only select on namespaces
 						continue
 					} else if clause.podSelector != nil {
+						klog.Infof("IN POD selector watch pods: %v", clause.podSelector)
 						//podSelector only
 						podSel, err := metav1.LabelSelectorAsSelector(clause.podSelector)
 						if err != nil {
@@ -327,6 +331,8 @@ func (oc *Controller) watchPods(policy *knet.NetworkPolicy, np *namespacePolicy,
 						}
 						if policy.Namespace == pod.Namespace && podSel.Matches(labels.Set(pod.Labels)) {
 							oc.handlePeerPodSelectorAddUpdate(np, gress.peerPodAddressMap, gress.hashedLocalAddressSet, obj)
+						} else {
+							klog.Warningf("NO MATCH IN POD SELECTOR: %v, %v, %v, %v", policy.Namespace, pod.Namespace, pod.Labels, podSel.Matches(labels.Set(pod.Labels)))
 						}
 					}
 				}
@@ -432,6 +438,7 @@ func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespaceP
 			for _, gress := range gressPolicies {
 				for _, clause := range gress.clauses {
 					if clause.namespaceSelector != nil && clause.podSelector != nil {
+						klog.Infof("IN DUAL SELECTOR WATCH NS: %v, %v", clause.namespaceSelector, clause.podSelector)
 						namespaceSel, err := metav1.LabelSelectorAsSelector(clause.namespaceSelector)
 						if err != nil {
 							klog.Errorf("Error creating label selector")
@@ -443,17 +450,23 @@ func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespaceP
 								klog.Errorf("Error grabbing pods for namespace:%s: %v", namespace.Name, err)
 							}
 							for _, pod := range pods {
+								klog.Infof("ITERATING THROUGH POD IN watchNS: %v", pod)
 								podSel, err := metav1.LabelSelectorAsSelector(clause.podSelector)
 								if err != nil {
 									klog.Errorf("Error creating label selector")
 								}
 								if podSel.Matches(labels.Set(pod.Labels)) {
 									oc.handlePeerPodSelectorAddUpdate(np, gress.peerPodAddressMap, gress.hashedLocalAddressSet, pod)
+								} else {
+									klog.Warningf("POD does not match label: %v, %v", pod.Labels, podSel)
 								}
 							}
+						} else {
+							klog.Warningf("NAMESPACE SEL NO MATCH: %v, %v",namespace.Labels, namespaceSel)
 						}
 
 					} else if clause.namespaceSelector != nil {
+						klog.Infof("IN NS selector watchNS: %v", clause.namespaceSelector)
 						namespaceSel, err := metav1.LabelSelectorAsSelector(clause.namespaceSelector)
 						if err != nil {
 							klog.Errorf("error creating label selector")
@@ -469,10 +482,15 @@ func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespaceP
 							oldL3Match, newL3Match, added := gress.addAddressSet(hashedAddressSet)
 							if added {
 								modifyFn(gress, np, oldL3Match, newL3Match)
+							} else {
+								klog.Warningf("NS Selector address Set not added: %v,%v, %v", oldL3Match, newL3Match, added)
 							}
 							np.Unlock()
+						} else {
+							klog.Warningf("NS SELECTOR NO MATCH watchNS: %v",namespaceSel, namespace.Labels)
 						}
 					} else if clause.podSelector != nil {
+						klog.Infof("POD selector in watchNS: %v", clause.podSelector)
 						// changes to a namespace will not affect clause that only selects on pods
 						continue
 					}
