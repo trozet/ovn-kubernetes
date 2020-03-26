@@ -212,19 +212,22 @@ func (oc *Controller) handlePeerPodSelectorAddUpdate(np *namespacePolicy,
 	pod := obj.(*kapi.Pod)
 	podAnnotation, err := util.UnmarshalPodAnnotation(pod.Annotations)
 	if err != nil {
+		klog.Errorf("UNABLE TO UNMARSHAL pod ANNOTATION")
 		return
 	}
 	ipAddress := podAnnotation.IP.IP.String()
 	if addressMap[ipAddress] {
+		klog.Errorf("ADDRESS MAP ALREADY HAS IP")
 		return
 	}
 
 	np.Lock()
 	defer np.Unlock()
 	if np.deleted {
+		klog.Errorf("NP DELETED")
 		return
 	}
-
+	klog.Infof("ADDING TO ADDR SET")
 	addressMap[ipAddress] = true
 	addToAddressSet(addressSet, ipAddress)
 }

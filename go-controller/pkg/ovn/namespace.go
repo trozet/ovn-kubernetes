@@ -54,6 +54,7 @@ func (oc *Controller) waitForNamespaceEvent(namespace string) error {
 }
 
 func (oc *Controller) addPodToNamespace(ns string, portInfo *lpInfo) error {
+	klog.Infof("INSIDE ADD POD TO NS")
 	mutex := oc.getNamespaceLock(ns)
 	if mutex == nil {
 		return nil
@@ -61,12 +62,14 @@ func (oc *Controller) addPodToNamespace(ns string, portInfo *lpInfo) error {
 	defer mutex.Unlock()
 
 	if oc.namespacePolicies[ns] == nil {
+		klog.Infof("addPodToNamespace: namespace policies were nil")
 		return nil
 	}
 
 	// If pod has already been added, nothing to do.
 	address := portInfo.ip.String()
 	if oc.namespaceAddressSet[ns][address] != "" {
+		klog.Infof("addPodToNamespace: address entry in address set map is nil")
 		return nil
 	}
 
