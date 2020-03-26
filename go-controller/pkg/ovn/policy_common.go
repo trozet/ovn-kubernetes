@@ -300,6 +300,7 @@ func (oc *Controller) watchPods(policy *knet.NetworkPolicy, np *namespacePolicy,
 	_, err := oc.watchFactory.AddPodHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			pod := obj.(*kapi.Pod)
+			klog.Infof("IN ADD POD FOR NP: %v, %v, %v", policy, np, gressPolicies)
 			for _, gress := range gressPolicies {
 				for _, clause := range gress.clauses {
 					if clause.namespaceSelector != nil && clause.podSelector != nil {
@@ -310,6 +311,7 @@ func (oc *Controller) watchPods(policy *knet.NetworkPolicy, np *namespacePolicy,
 							continue
 						}
 						if match {
+							klog.Infof("IN MATCH: %v, %v, %v, %v", np, gress.peerPodAddressMap, gress.hashedLocalAddressSet, obj)
 							oc.handlePeerPodSelectorAddUpdate(np, gress.peerPodAddressMap, gress.hashedLocalAddressSet, obj)
 						} else {
 							klog.Warningf("DID NOT MATCH: %v, %v,%v,%v", np, gress.peerPodAddressMap, gress.hashedLocalAddressSet, obj)
@@ -426,6 +428,7 @@ func (oc *Controller) watchNamespaces(policy *knet.NetworkPolicy, np *namespaceP
 	_, err := oc.watchFactory.AddNamespaceHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			namespace := obj.(*kapi.Namespace)
+			klog.Infof("IN ADD NS FOR NP: %v, %v, %v", policy, np, gressPolicies)
 			for _, gress := range gressPolicies {
 				for _, clause := range gress.clauses {
 					if clause.namespaceSelector != nil && clause.podSelector != nil {
