@@ -61,7 +61,7 @@ func (oc *Controller) forEachAddressSetUnhashedName(iteratorFn func(
 }
 
 func addToAddressSet(hashName string, address string) {
-	klog.V(5).Infof("addToAddressSet for %s with %s", hashName, address)
+	klog.Infof("addToAddressSet for %s with %s", hashName, address)
 
 	_, stderr, err := util.RunOVNNbctl("add", "address_set",
 		hashName, "addresses", address)

@@ -212,12 +212,12 @@ func (oc *Controller) handlePeerPodSelectorAddUpdate(np *namespacePolicy,
 	pod := obj.(*kapi.Pod)
 	podAnnotation, err := util.UnmarshalPodAnnotation(pod.Annotations)
 	if err != nil {
-		klog.Errorf("UNABLE TO UNMARSHAL pod ANNOTATION")
+		klog.Errorf("UNABLE TO UNMARSHAL pod ANNOTATION: %v", pod.Annotations)
 		return
 	}
 	ipAddress := podAnnotation.IP.IP.String()
 	if addressMap[ipAddress] {
-		klog.Errorf("ADDRESS MAP ALREADY HAS IP")
+		klog.Errorf("ADDRESS MAP ALREADY HAS IP: %v, %s", addressMap, ipAddress)
 		return
 	}
 
