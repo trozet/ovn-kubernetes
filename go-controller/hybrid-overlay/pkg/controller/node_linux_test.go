@@ -54,6 +54,7 @@ func addNodeSetupCmds(fexec *ovntest.FakeExec, nodeName string) (string, string)
 		"ovs-ofctl add-flow br-ext table=0,priority=100,in_port=ext,arp,arp_tpa=" + testNodeIP + ",actions=move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],mod_dl_src:" + testDRMAC + ",load:0x2->NXM_OF_ARP_OP[],move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],load:0x" + testDRMACRaw + "->NXM_NX_ARP_SHA[],load:0x" + testNodeIPRaw + "->NXM_OF_ARP_SPA[],IN_PORT",
 		`ovs-vsctl --timeout=15 --may-exist add-port br-ext ext-vxlan -- set interface ext-vxlan type=vxlan options:remote_ip="flow" options:key="flow"`,
 		"ovs-ofctl add-flow br-ext table=0,priority=100,in_port=ext-vxlan,ip,nw_dst=" + testNodeSubnet + ",dl_dst=" + testDRMAC + ",actions=goto_table:10",
+		"ovs-ofctl add-flow br-ext table=0,priority=100,arp,in_port=ext-vxlan,arp_tpa=" + testNodeSubnet + ",actions=move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],mod_dl_src:" + testDRMAC + ",load:0x2->NXM_OF_ARP_OP[],move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],load:0x" + testDRMACRaw + "->NXM_NX_ARP_SHA[],move:NXM_OF_ARP_TPA[]->NXM_NX_REG0[],move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],move:NXM_NX_REG0[]->NXM_OF_ARP_SPA[],IN_PORT",
 		"ovs-ofctl add-flow br-ext table=10,priority=0,actions=drop",
 	})
 	return testNodeIP, testDRMAC
@@ -339,7 +340,7 @@ var _ = Describe("Hybrid Overlay Node Linux Operations", func() {
 			})
 			fexec.AddFakeCmdsNoOutputNoError([]string{
 				// Deletes flows for stale node in OVS
-				"ovs-ofctl del-flows br-ext table=0,cookie=0x1f40e27c/0xffffffff",
+				"ovs-ofctl del-flows br-ext cookie=0x1f40e27c/0xffffffff",
 			})
 
 			_, err := config.InitConfig(ctx, fexec, nil)
@@ -386,7 +387,7 @@ var _ = Describe("Hybrid Overlay Node Linux Operations", func() {
 			})
 			fexec.AddFakeCmdsNoOutputNoError([]string{
 				// Deletes flows for pod in OVS that is not in Kube
-				"ovs-ofctl del-flows br-ext table=10,cookie=0xaabbccdd/0xffffffff",
+				"ovs-ofctl del-flows br-ext cookie=0xaabbccdd/0xffffffff",
 			})
 
 			_, err := config.InitConfig(ctx, fexec, nil)
@@ -432,10 +433,6 @@ var _ = Describe("Hybrid Overlay Node Linux Operations", func() {
 				Cmd: "ovs-ofctl dump-flows br-ext table=10",
 				Output: ` cookie=0x7fdcde17, duration=29398.539s, table=10, n_packets=0, n_bytes=0, priority=100,ip,nw_dst=` + pod1CIDR + ` actions=mod_dl_src:` + hybMAC + `,mod_dl_dst:` + pod1MAC + `,output:ext
  cookie=0x0, duration=29398.687s, table=10, n_packets=0, n_bytes=0, priority=0 actions=drop`,
-			})
-			fexec.AddFakeCmdsNoOutputNoError([]string{
-				// Refreshes flows for pod that is in OVS and in Kube
-				"ovs-ofctl add-flow br-ext table=10,cookie=0x7fdcde17,priority=100,ip,nw_dst=" + pod1IP + ",actions=set_field:" + hybMAC + "->eth_src,set_field:" + pod1MAC + "->eth_dst,output:ext",
 			})
 
 			_, err := config.InitConfig(ctx, fexec, nil)

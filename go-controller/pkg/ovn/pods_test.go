@@ -196,7 +196,8 @@ var _ = Describe("OVN Pod Operations", func() {
 
 		It("reconciles an existing pod", func() {
 			app.Action = func(ctx *cli.Context) error {
-
+				test := namespace{}
+				namespaceT := *newNamespace("namespace")
 				// Setup an unassigned pod, perform an update later on which assigns it.
 				t := newTPod(
 					"",
@@ -208,17 +209,23 @@ var _ = Describe("OVN Pod Operations", func() {
 					"11:22:33:44:55:66",
 					"namespace",
 				)
-
-				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
-					Output: "\n",
-				})
-
-				fakeOvn.start(ctx, &v1.PodList{
-					Items: []v1.Pod{
-						*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+				test.baseCmds(fExec, namespaceT)
+				test.addCmdsWithPods(fExec, t, namespaceT)
+				t.baseCmds(fExec)
+				fakeOvn.start(ctx,
+					&v1.PodList{
+						Items: []v1.Pod{
+							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+						},
 					},
-				})
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+				)
+
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				pod, err := fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Get(t.podName, metav1.GetOptions{})
@@ -255,7 +262,8 @@ var _ = Describe("OVN Pod Operations", func() {
 
 		It("reconciles a new pod", func() {
 			app.Action = func(ctx *cli.Context) error {
-
+				test := namespace{}
+				namespaceT := *newNamespace("namespace")
 				t := newTPod(
 					"node1",
 					"10.128.1.0/24",
@@ -264,15 +272,24 @@ var _ = Describe("OVN Pod Operations", func() {
 					"myPod",
 					"10.128.1.4",
 					"11:22:33:44:55:66",
-					"namespace",
+					namespaceT.Name,
 				)
-
+				test.baseCmds(fExec, namespaceT)
+				test.addCmds(fExec, namespaceT)
 				t.baseCmds(fExec)
 
-				fakeOvn.start(ctx, &v1.PodList{
-					Items: []v1.Pod{},
-				})
+				fakeOvn.start(ctx,
+					&v1.PodList{
+						Items: []v1.Pod{},
+					},
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+				)
 				t.populateLogicalSwitchCache(fakeOvn)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				pod, _ := fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Get(t.podName, metav1.GetOptions{})
@@ -281,6 +298,9 @@ var _ = Describe("OVN Pod Operations", func() {
 
 				t.addCmdsForNonExistingPod(fExec)
 				t.addPodDenyMcast(fExec)
+				fExec.AddFakeCmdsNoOutputNoError([]string{
+					fmt.Sprintf(`ovn-nbctl --timeout=15 add address_set %s addresses "%s"`, hashedAddressSet("namespace"), t.podIP),
+				})
 
 				_, err := fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Create(newPod(t.namespace, t.podName, t.nodeName, t.podIP))
 				Expect(err).NotTo(HaveOccurred())
@@ -302,7 +322,8 @@ var _ = Describe("OVN Pod Operations", func() {
 
 		It("reconciles a deleted pod", func() {
 			app.Action = func(ctx *cli.Context) error {
-
+				test := namespace{}
+				namespaceT := *newNamespace("namespace")
 				// Setup an assigned pod
 				t := newTPod(
 					"node1",
@@ -312,22 +333,28 @@ var _ = Describe("OVN Pod Operations", func() {
 					"myPod",
 					"10.128.1.4",
 					"11:22:33:44:55:66",
-					"namespace",
+					namespaceT.Name,
 				)
-
-				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
-					Output: "\n",
-				})
+				test.baseCmds(fExec, namespaceT)
+				test.addCmdsWithPods(fExec, t, namespaceT)
+				t.baseCmds(fExec)
 				t.addCmdsForNonExistingPod(fExec)
 				t.addPodDenyMcast(fExec)
 
-				fakeOvn.start(ctx, &v1.PodList{
-					Items: []v1.Pod{
-						*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+				fakeOvn.start(ctx,
+					&v1.PodList{
+						Items: []v1.Pod{
+							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+						},
 					},
-				})
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+				)
 				t.populateLogicalSwitchCache(fakeOvn)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				pod, err := fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Get(t.podName, metav1.GetOptions{})
@@ -340,6 +367,7 @@ var _ = Describe("OVN Pod Operations", func() {
 
 				// Delete it
 				t.delPodDenyMcast(fExec)
+				t.delFromNamespaceCmds(fExec, t, false)
 				t.delCmds(fExec)
 
 				err = fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Delete(t.podName, metav1.NewDeleteOptions(0))
@@ -359,7 +387,8 @@ var _ = Describe("OVN Pod Operations", func() {
 
 		It("retries a failed pod Add on Update", func() {
 			app.Action = func(ctx *cli.Context) error {
-
+				test := namespace{}
+				namespaceT := *newNamespace("namespace")
 				// Setup an unassigned pod, perform an update later on which assigns it.
 				t := newTPod(
 					"node1",
@@ -369,21 +398,27 @@ var _ = Describe("OVN Pod Operations", func() {
 					"myPod",
 					"10.128.1.4",
 					"11:22:33:44:55:66",
-					"namespace",
+					namespaceT.Name,
 				)
-
-				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
-					Output: "\n",
-				})
+				test.baseCmds(fExec, namespaceT)
+				test.addCmdsWithPods(fExec, t, namespaceT)
+				t.baseCmds(fExec)
 				t.addCmdsForNonExistingFailedPod(fExec)
 
-				fakeOvn.start(ctx, &v1.PodList{
-					Items: []v1.Pod{
-						*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+				fakeOvn.start(ctx,
+					&v1.PodList{
+						Items: []v1.Pod{
+							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+						},
 					},
-				})
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+				)
 				t.populateLogicalSwitchCache(fakeOvn)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 				Expect(fExec.CalledMatchesExpected()).To(BeTrue(), fExec.ErrorDesc)
 
@@ -413,7 +448,8 @@ var _ = Describe("OVN Pod Operations", func() {
 
 		It("reconciles an existing pod", func() {
 			app.Action = func(ctx *cli.Context) error {
-
+				test := namespace{}
+				namespaceT := *newNamespace("namespace")
 				t := newTPod(
 					"node1",
 					"10.128.1.0/24",
@@ -422,24 +458,26 @@ var _ = Describe("OVN Pod Operations", func() {
 					"myPod",
 					"10.128.1.4",
 					"11:22:33:44:55:66",
-					"namespace",
+					namespaceT.Name,
 				)
-
-				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
-					Output: t.portName + "\n",
-				})
-				fExec.AddFakeCmdsNoOutputNoError([]string{
-					"ovn-nbctl --timeout=15 --if-exists lsp-del " + t.portName,
-				})
+				test.baseCmds(fExec, namespaceT)
+				test.addCmdsWithPods(fExec, t, namespaceT)
+				t.baseCmds(fExec)
 				t.addCmdsForNonExistingPod(fExec)
 				t.addPodDenyMcast(fExec)
 
-				fakeOvn.start(ctx, &v1.PodList{
-					Items: []v1.Pod{
-						*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+				fakeOvn.start(ctx,
+					&v1.PodList{
+						Items: []v1.Pod{
+							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+						},
 					},
-				})
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+				)
 				t.populateLogicalSwitchCache(fakeOvn)
 
 				pod, err := fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Get(t.podName, metav1.GetOptions{})
@@ -448,6 +486,7 @@ var _ = Describe("OVN Pod Operations", func() {
 				_, ok := pod.Annotations[util.OvnPodAnnotationName]
 				Expect(ok).To(BeFalse())
 
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				pod, err = fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Get(t.podName, metav1.GetOptions{})
@@ -467,7 +506,8 @@ var _ = Describe("OVN Pod Operations", func() {
 
 		It("reconciles a deleted pod", func() {
 			app.Action = func(ctx *cli.Context) error {
-
+				test := namespace{}
+				namespaceT := *newNamespace("namespace")
 				t := newTPod(
 					"node1",
 					"10.128.1.0/24",
@@ -476,9 +516,11 @@ var _ = Describe("OVN Pod Operations", func() {
 					"myPod",
 					"10.128.1.4",
 					"11:22:33:44:55:66",
-					"namespace",
+					namespaceT.Name,
 				)
 
+				test.baseCmds(fExec, namespaceT)
+				test.addCmds(fExec, namespaceT)
 				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
 					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
 					Output: t.portName + "\n",
@@ -486,7 +528,15 @@ var _ = Describe("OVN Pod Operations", func() {
 
 				t.delCmds(fExec)
 
-				fakeOvn.start(ctx)
+				fakeOvn.start(ctx,
+					&v1.PodList{},
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+				)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				Expect(fExec.CalledMatchesExpected()).To(BeTrue(), fExec.ErrorDesc)
@@ -500,7 +550,8 @@ var _ = Describe("OVN Pod Operations", func() {
 
 		It("reconciles a new pod", func() {
 			app.Action = func(ctx *cli.Context) error {
-
+				test := namespace{}
+				namespaceT := *newNamespace("namespace")
 				t := newTPod(
 					"node1",
 					"10.128.1.0/24",
@@ -509,22 +560,29 @@ var _ = Describe("OVN Pod Operations", func() {
 					"myPod",
 					"10.128.1.4",
 					"11:22:33:44:55:66",
-					"namespace",
+					namespaceT.Name,
 				)
 
-				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
-					Output: "\n",
-				})
+				test.baseCmds(fExec, namespaceT)
+				test.addCmdsWithPods(fExec, t, namespaceT)
+				t.baseCmds(fExec)
 				t.addCmdsForNonExistingPod(fExec)
 				t.addPodDenyMcast(fExec)
 
-				fakeOvn.start(ctx, &v1.PodList{
-					Items: []v1.Pod{
-						*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+				fakeOvn.start(ctx,
+					&v1.PodList{
+						Items: []v1.Pod{
+							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+						},
 					},
-				})
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+				)
 				t.populateLogicalSwitchCache(fakeOvn)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				pod, err := fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Get(t.podName, metav1.GetOptions{})
@@ -547,7 +605,8 @@ var _ = Describe("OVN Pod Operations", func() {
 
 		It("reconciles an existing pod without an existing logical switch port", func() {
 			app.Action = func(ctx *cli.Context) error {
-
+				test := namespace{}
+				namespaceT := *newNamespace("namespace")
 				t := newTPod(
 					"node1",
 					"10.128.1.0/24",
@@ -556,22 +615,29 @@ var _ = Describe("OVN Pod Operations", func() {
 					"myPod",
 					"10.128.1.4",
 					"11:22:33:44:55:66",
-					"namespace",
+					namespaceT.Name,
 				)
 
-				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
-					Output: "\n",
-				})
+				test.baseCmds(fExec, namespaceT)
+				test.addCmdsWithPods(fExec, t, namespaceT)
+				t.baseCmds(fExec)
 				t.addCmdsForNonExistingPod(fExec)
 				t.addPodDenyMcast(fExec)
 
-				fakeOvn.start(ctx, &v1.PodList{
-					Items: []v1.Pod{
-						*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+				fakeOvn.start(ctx,
+					&v1.PodList{
+						Items: []v1.Pod{
+							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+						},
 					},
-				})
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+				)
 				t.populateLogicalSwitchCache(fakeOvn)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				pod, err := fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Get(t.podName, metav1.GetOptions{})
@@ -583,6 +649,8 @@ var _ = Describe("OVN Pod Operations", func() {
 				Expect(podAnnotation).To(MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
 
 				// Simulate an OVN restart with a new IP assignment and verify that the pod annotation is updated.
+				test.baseCmds(fExec, namespaceT)
+				test.addCmdsWithPods(fExec, t, namespaceT)
 				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
 					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
 					Output: "\n",
@@ -597,6 +665,7 @@ var _ = Describe("OVN Pod Operations", func() {
 
 				fakeOvn.restart()
 				t.populateLogicalSwitchCache(fakeOvn)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				pod, err = fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Get(t.podName, metav1.GetOptions{})
@@ -617,7 +686,8 @@ var _ = Describe("OVN Pod Operations", func() {
 
 		It("reconciles an existing pod with an existing logical switch port", func() {
 			app.Action = func(ctx *cli.Context) error {
-
+				test := namespace{}
+				namespaceT := *newNamespace("namespace")
 				t := newTPod(
 					"node1",
 					"10.128.1.0/24",
@@ -626,9 +696,10 @@ var _ = Describe("OVN Pod Operations", func() {
 					"myPod",
 					"10.128.1.4",
 					"11:22:33:44:55:66",
-					"namespace",
+					namespaceT.Name,
 				)
-
+				test.baseCmds(fExec, namespaceT)
+				test.addCmdsWithPods(fExec, t, namespaceT)
 				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
 					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
 					Output: "\n",
@@ -636,12 +707,20 @@ var _ = Describe("OVN Pod Operations", func() {
 				t.addCmdsForNonExistingPod(fExec)
 				t.addPodDenyMcast(fExec)
 
-				fakeOvn.start(ctx, &v1.PodList{
-					Items: []v1.Pod{
-						*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+				fakeOvn.start(ctx,
+					&v1.PodList{
+						Items: []v1.Pod{
+							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
+						},
 					},
-				})
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespaceT,
+						},
+					},
+				)
 				t.populateLogicalSwitchCache(fakeOvn)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				pod, err := fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Get(t.podName, metav1.GetOptions{})
@@ -653,6 +732,8 @@ var _ = Describe("OVN Pod Operations", func() {
 				Expect(podAnnotation).To(MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
 
 				// Simulate an OVN restart with a new IP assignment and verify that the pod annotation is updated.
+				test.baseCmds(fExec, namespaceT)
+				test.addCmdsWithPods(fExec, t, namespaceT)
 				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
 					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
 					Output: "\n",
@@ -667,6 +748,7 @@ var _ = Describe("OVN Pod Operations", func() {
 
 				fakeOvn.restart()
 				t.populateLogicalSwitchCache(fakeOvn)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				pod, err = fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Get(t.podName, metav1.GetOptions{})

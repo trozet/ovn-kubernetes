@@ -15,6 +15,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 
 	kapi "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog"
@@ -28,6 +29,7 @@ const (
 // NodeController is the node hybrid overlay controller
 type NodeController struct {
 	kube        kube.Interface
+	wf          *factory.WatchFactory
 	nodeName    string
 	initialized bool
 	drMAC       string
@@ -53,6 +55,27 @@ func podToCookie(pod *kapi.Pod) string {
 	return nameToCookie(pod.Namespace + "_" + pod.Name)
 }
 
+func (n *NodeController) waitForNamespace(name string) (*kapi.Namespace, error) {
+	var namespaceBackoff = wait.Backoff{Duration: 1 * time.Second, Steps: 7, Factor: 1.5, Jitter: 0.1}
+	var namespace *kapi.Namespace
+	if err := wait.ExponentialBackoff(namespaceBackoff, func() (bool, error) {
+		var err error
+		namespace, err = n.wf.GetNamespace(name)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// Namespace not found; retry
+				return false, nil
+			}
+			klog.Warningf("error getting namespace: %v", err)
+			return false, err
+		}
+		return true, nil
+	}); err != nil {
+		return nil, fmt.Errorf("failed to get namespace object: %v", err)
+	}
+	return namespace, nil
+}
+
 func (n *NodeController) addOrUpdatePod(pod *kapi.Pod) error {
 	podIPs, podMAC, err := getPodDetails(pod, n.nodeName)
 	if err != nil {
@@ -60,6 +83,11 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod) error {
 		return n.deletePod(pod)
 	}
 
+	namespace, err := n.waitForNamespace(pod.Namespace)
+	if err != nil {
+		return err
+	}
+	namespaceExternalGw := namespace.GetAnnotations()[hotypes.HybridOverlayExternalGw]
 	cookie := podToCookie(pod)
 	for _, podIP := range podIPs {
 		_, _, err = util.RunOVSOfctl("add-flow", extBridgeName,
@@ -67,13 +95,20 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod) error {
 		if err != nil {
 			return fmt.Errorf("failed to add flows for pod %s/%s: %v", pod.Namespace, pod.Name, err)
 		}
+		if namespaceExternalGw != "" {
+			_, _, err = util.RunOVSOfctl("add-flow", extBridgeName,
+				fmt.Sprintf("table=0, cookie=0x%s, priority=100, ip, nw_src=%s, actions=load:%d->NXM_NX_TUN_ID[0..31],set_field:%s->tun_dst,mod_dl_src:%s,output:%s", cookie, podIP.IP, hotypes.HybridOverlayVNI, namespaceExternalGw, n.drMAC, extVXLANName))
+			if err != nil {
+				return fmt.Errorf("failed to add flows for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			}
+		}
 	}
 	return nil
 }
 
 func (n *NodeController) deletePod(pod *kapi.Pod) error {
 	if pod.Spec.NodeName == n.nodeName {
-		if err := deleteFlowsByCookie(10, podToCookie(pod)); err != nil {
+		if err := deleteFlowsByCookie(podToCookie(pod)); err != nil {
 			return fmt.Errorf("failed to delete flows for pod %s/%s: %v", pod.Namespace, pod.Name, err)
 		}
 	}
@@ -150,7 +185,7 @@ func (n *NodeController) syncPods(pods []interface{}) {
 	}
 
 	for cookie := range cookiesToRemove {
-		if err := deleteFlowsByCookie(10, cookie); err != nil {
+		if err := deleteFlowsByCookie(cookie); err != nil {
 			klog.Errorf("failed clean stale hybrid overlay pod flow %q: %v", cookie, err)
 		}
 	}
@@ -166,6 +201,7 @@ func (n *NodeController) Start(wf *factory.WatchFactory) error {
 }
 
 func (n *NodeController) startPodWatch(wf *factory.WatchFactory) error {
+	n.wf = wf
 	_, err := wf.AddPodHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			pod := obj.(*kapi.Pod)
@@ -281,10 +317,10 @@ func (n *NodeController) Update(oldNode, newNode *kapi.Node) {
 	}
 }
 
-func deleteFlowsByCookie(table int, cookie string) error {
-	_, stderr, err := util.RunOVSOfctl("del-flows", extBridgeName, fmt.Sprintf("table=%d,cookie=0x%s/0xffffffff", table, cookie))
+func deleteFlowsByCookie(cookie string) error {
+	_, stderr, err := util.RunOVSOfctl("del-flows", extBridgeName, fmt.Sprintf("cookie=0x%s/0xffffffff", cookie))
 	if err != nil {
-		return fmt.Errorf("failed to delete table %d flows for cookie %q: %v, stderr: %v", table, cookie, err, stderr)
+		return fmt.Errorf("failed to delete flows for cookie %q: %v, stderr: %v", cookie, err, stderr)
 	}
 	return nil
 }
@@ -295,7 +331,7 @@ func (n *NodeController) Delete(node *kapi.Node) {
 		return
 	}
 
-	if err := deleteFlowsByCookie(0, nameToCookie(node.Name)); err != nil {
+	if err := deleteFlowsByCookie(nameToCookie(node.Name)); err != nil {
 		klog.Errorf(err.Error())
 	}
 }
@@ -344,7 +380,7 @@ func (n *NodeController) Sync(nodes []*kapi.Node) {
 	}
 
 	for cookie := range nodesToRemove {
-		if err := deleteFlowsByCookie(0, cookie); err != nil {
+		if err := deleteFlowsByCookie(cookie); err != nil {
 			klog.Errorf("Failed clean stale hybrid overlay node flow %q: %v", cookie, err)
 		}
 	}
@@ -481,6 +517,25 @@ func (n *NodeController) ensureHybridOverlayBridge() error {
 	if err != nil {
 		return fmt.Errorf("failed to set up hybrid overlay bridge ARP flow,"+
 			"stderr: %q, error: %v", stderr, err)
+	}
+
+	// Handle ARP for hybrid external gateway
+	_, _, err = util.RunOVSOfctl("add-flow", extBridgeName,
+		fmt.Sprintf("table=0,priority=100,arp,in_port=%s,arp_tpa=%s,"+
+			"actions=move:tun_src->tun_dst,"+
+			"load:%d->NXM_NX_TUN_ID[0..31],"+
+			"move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],"+
+			"mod_dl_src:%s,"+
+			"load:0x2->NXM_OF_ARP_OP[],"+
+			"move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],"+
+			"load:0x%s->NXM_NX_ARP_SHA[],"+
+			"move:NXM_OF_ARP_TPA[]->NXM_NX_REG0[],"+
+			"move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],"+
+			"move:NXM_NX_REG0[]->NXM_OF_ARP_SPA[],"+
+			"IN_PORT",
+			extVXLANName, subnet.String(), portMAC.String(), portMACRaw))
+	if err != nil {
+		return fmt.Errorf("failed to add ARP responder flow for hybrid external gw on node %q: %v", n.nodeName, err)
 	}
 
 	// Default drop rule for incoming VXLAN traffic that matches no running pod
