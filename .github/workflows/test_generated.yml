@@ -63,8 +63,6 @@ jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event.pull_request_review_comment.comment
-      == '/retest'
     steps:
     - name: Free up disk space
       run: sudo eatmydata apt-get remove --auto-remove -y aspnetcore-* dotnet-* libmono-*
