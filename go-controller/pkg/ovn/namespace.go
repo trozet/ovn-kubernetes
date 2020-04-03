@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	hotypes "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
 	kapi "k8s.io/api/core/v1"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
@@ -151,6 +152,8 @@ func (oc *Controller) AddNamespace(ns *kapi.Namespace) {
 		}
 	}
 
+	nsInfo.hybridOverlayExternalGw = ns.GetAnnotations()[hotypes.HybridOverlayExternalGw]
+
 	// Create an address_set for the namespace.  All the pods' IP address
 	// in the namespace will be added to the address_set
 	createAddressSet(ns.Name, hashedAddressSet(ns.Name), addresses)
@@ -168,6 +171,7 @@ func (oc *Controller) updateNamespace(old, newer *kapi.Namespace) {
 	}
 	defer nsInfo.Unlock()
 
+	nsInfo.hybridOverlayExternalGw = newer.GetAnnotations()[hotypes.HybridOverlayExternalGw]
 	oc.multicastUpdateNamespace(newer, nsInfo)
 }
 
@@ -236,9 +240,10 @@ func (oc *Controller) createNamespaceLocked(ns string) *namespaceInfo {
 	defer oc.namespacesMutex.Unlock()
 
 	nsInfo := &namespaceInfo{
-		addressSet:       make(map[string]string),
-		networkPolicies:  make(map[string]*namespacePolicy),
-		multicastEnabled: false,
+		addressSet:              make(map[string]string),
+		networkPolicies:         make(map[string]*namespacePolicy),
+		hybridOverlayExternalGw: "",
+		multicastEnabled:        false,
 	}
 	nsInfo.Lock()
 	oc.namespaces[ns] = nsInfo

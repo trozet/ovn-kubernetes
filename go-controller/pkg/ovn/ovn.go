@@ -60,6 +60,8 @@ type namespaceInfo struct {
 	// the policy itself.
 	networkPolicies map[string]*namespacePolicy
 
+	hybridOverlayExternalGw string
+
 	multicastEnabled bool
 }
 
