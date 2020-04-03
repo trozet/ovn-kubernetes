@@ -2,8 +2,11 @@ package util
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"k8s.io/klog"
+	kexec "k8s.io/utils/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -11,10 +14,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/sirupsen/logrus"
-	kexec "k8s.io/utils/exec"
-
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -22,27 +23,32 @@ const (
 	// adding internal ports on a non Hyper-V enabled host will call
 	// external Powershell commandlets.
 	// TODO: Decrease the timeout once port adding is improved on Windows
-	ovsCommandTimeout = 15
-	ovsVsctlCommand   = "ovs-vsctl"
-	ovsOfctlCommand   = "ovs-ofctl"
-	ovsAppctlCommand  = "ovs-appctl"
-	ovnNbctlCommand   = "ovn-nbctl"
-	ovnSbctlCommand   = "ovn-sbctl"
-	ipCommand         = "ip"
-	powershellCommand = "powershell"
-	netshCommand      = "netsh"
-	routeCommand      = "route"
-	osRelease         = "/etc/os-release"
-	rhel              = "RHEL"
-	ubuntu            = "Ubuntu"
-	windowsOS         = "windows"
+	ovsCommandTimeout  = 15
+	ovsVsctlCommand    = "ovs-vsctl"
+	ovsOfctlCommand    = "ovs-ofctl"
+	ovsAppctlCommand   = "ovs-appctl"
+	ovnNbctlCommand    = "ovn-nbctl"
+	ovnSbctlCommand    = "ovn-sbctl"
+	ovnAppctlCommand   = "ovn-appctl"
+	ovsdbClientCommand = "ovsdb-client"
+	ipCommand          = "ip"
+	powershellCommand  = "powershell"
+	netshCommand       = "netsh"
+	routeCommand       = "route"
+	osRelease          = "/etc/os-release"
+	rhel               = "RHEL"
+	ubuntu             = "Ubuntu"
+	windowsOS          = "windows"
 )
 
 const (
-	nbdbCtlSockPath   = "/var/run/openvswitch/ovnnb_db.ctl"
-	sbdbCtlSockPath   = "/var/run/openvswitch/ovnsb_db.ctl"
-	northdCtlSockPath = "/var/run/openvswitch/ovn-northd.ctl"
+	nbdbCtlSock = "ovnnb_db.ctl"
+	sbdbCtlSock = "ovnsb_db.ctl"
 )
+
+// this metric is set only for the ovnkube in master mode since 99.9% of
+// all the ovn-nbctl/ovn-sbctl calls occur on the master
+var MetricOvnCliLatency *prometheus.HistogramVec
 
 func runningPlatform() (string, error) {
 	if runtime.GOOS == windowsOS {
@@ -83,17 +89,20 @@ func runningPlatform() (string, error) {
 
 // Exec runs various OVN and OVS utilities
 type execHelper struct {
-	exec           kexec.Interface
-	ofctlPath      string
-	vsctlPath      string
-	appctlPath     string
-	nbctlPath      string
-	sbctlPath      string
-	ovnctlPath     string
-	ipPath         string
-	powershellPath string
-	netshPath      string
-	routePath      string
+	exec            kexec.Interface
+	ofctlPath       string
+	vsctlPath       string
+	appctlPath      string
+	ovnappctlPath   string
+	nbctlPath       string
+	sbctlPath       string
+	ovnctlPath      string
+	ovsdbClientPath string
+	ovnRunDir       string
+	ipPath          string
+	powershellPath  string
+	netshPath       string
+	routePath       string
 }
 
 var runner *execHelper
@@ -101,9 +110,11 @@ var runner *execHelper
 // SetExec validates executable paths and saves the given exec interface
 // to be used for running various OVS and OVN utilites
 func SetExec(exec kexec.Interface) error {
-	var err error
+	err := SetExecWithoutOVS(exec)
+	if err != nil {
+		return err
+	}
 
-	runner = &execHelper{exec: exec}
 	runner.ofctlPath, err = exec.LookPath(ovsOfctlCommand)
 	if err != nil {
 		return err
@@ -117,6 +128,21 @@ func SetExec(exec kexec.Interface) error {
 		return err
 	}
 
+	runner.ovnappctlPath, err = exec.LookPath(ovnAppctlCommand)
+	if err != nil {
+		// If ovn-appctl command is not available then fall back to
+		// ovs-appctl. It also means OVN is using the rundir of
+		// openvswitch.
+		runner.ovnappctlPath = runner.appctlPath
+		runner.ovnctlPath = "/usr/share/openvswitch/scripts/ovn-ctl"
+		runner.ovnRunDir = "/var/run/openvswitch/"
+	} else {
+		// If ovn-appctl command is available, it means OVN
+		// has its own separate rundir, logdir, sharedir.
+		runner.ovnctlPath = "/usr/share/ovn/scripts/ovn-ctl"
+		runner.ovnRunDir = "/var/run/ovn/"
+	}
+
 	runner.nbctlPath, err = exec.LookPath(ovnNbctlCommand)
 	if err != nil {
 		return err
@@ -125,8 +151,20 @@ func SetExec(exec kexec.Interface) error {
 	if err != nil {
 		return err
 	}
-	runner.ovnctlPath = "/usr/share/openvswitch/scripts/ovn-ctl"
+	runner.ovsdbClientPath, err = exec.LookPath(ovsdbClientCommand)
+	if err != nil {
+		return err
+	}
 
+	return nil
+}
+
+// SetExecWithoutOVS validates executable paths excluding OVS/OVN binaries and
+// saves the given exec interface to be used for running various utilites
+func SetExecWithoutOVS(exec kexec.Interface) error {
+	var err error
+
+	runner = &execHelper{exec: exec}
 	if runtime.GOOS == windowsOS {
 		runner.powershellPath, err = exec.LookPath(powershellCommand)
 		if err != nil {
@@ -187,13 +225,13 @@ func runCmd(cmd kexec.Cmd, cmdPath string, args ...string) (*bytes.Buffer, *byte
 
 	counter := atomic.AddUint64(&runCounter, 1)
 	logCmd := fmt.Sprintf("%s %s", cmdPath, strings.Join(args, " "))
-	logrus.Debugf("exec(%d): %s", counter, logCmd)
+	klog.V(5).Infof("exec(%d): %s", counter, logCmd)
 
 	err := cmd.Run()
-	logrus.Debugf("exec(%d): stdout: %q", counter, stdout)
-	logrus.Debugf("exec(%d): stderr: %q", counter, stderr)
+	klog.V(5).Infof("exec(%d): stdout: %q", counter, stdout)
+	klog.V(5).Infof("exec(%d): stderr: %q", counter, stderr)
 	if err != nil {
-		logrus.Debugf("exec(%d): err: %v", counter, err)
+		klog.V(5).Infof("exec(%d): err: %v", counter, err)
 	}
 	return stdout, stderr, err
 }
@@ -223,11 +261,25 @@ func RunOVSVsctl(args ...string) (string, string, error) {
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
-// RunOVSAppctl runs a command via ovs-appctl.
-func RunOVSAppctl(args ...string) (string, string, error) {
-	cmdArgs := []string{fmt.Sprintf("--timeout=%d", ovsCommandTimeout)}
+// RunOVSAppctlWithTimeout runs a command via ovs-appctl.
+func RunOVSAppctlWithTimeout(timeout int, args ...string) (string, string, error) {
+	cmdArgs := []string{fmt.Sprintf("--timeout=%d", timeout)}
 	cmdArgs = append(cmdArgs, args...)
 	stdout, stderr, err := run(runner.appctlPath, cmdArgs...)
+	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
+}
+
+// RunOVSAppctl runs a command via ovs-appctl.
+func RunOVSAppctl(args ...string) (string, string, error) {
+	return RunOVSAppctlWithTimeout(ovsCommandTimeout, args...)
+}
+
+// RunOVNAppctlWithTimeout runs a command via ovn-appctl. If ovn-appctl is not present, then it
+// falls back to using ovs-appctl.
+func RunOVNAppctlWithTimeout(timeout int, args ...string) (string, string, error) {
+	cmdArgs := []string{fmt.Sprintf("--timeout=%d", timeout)}
+	cmdArgs = append(cmdArgs, args...)
+	stdout, stderr, err := run(runner.ovnappctlPath, cmdArgs...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
@@ -257,6 +309,8 @@ func runOVNretry(cmdPath string, envVars []string, args ...string) (*bytes.Buffe
 	}
 }
 
+var SkippedNbctlDaemonCounter uint64
+
 func getNbctlArgsAndEnv(timeout int, args ...string) ([]string, []string) {
 	var cmdArgs, envVars []string
 
@@ -265,18 +319,19 @@ func getNbctlArgsAndEnv(timeout int, args ...string) ([]string, []string) {
 		// ovn-nbctl running in the background and afterward uses the daemon to execute
 		// operations. The client needs to use the control socket and set the path to the
 		// control socket in environment variable OVN_NB_DAEMON
-		pid, err := ioutil.ReadFile("/var/run/openvswitch/ovn-nbctl.pid")
+		pid, err := ioutil.ReadFile(runner.ovnRunDir + "ovn-nbctl.pid")
 		if err == nil {
 			envVars = append(envVars,
-				fmt.Sprintf("OVN_NB_DAEMON=/var/run/openvswitch/ovn-nbctl.%s.ctl",
+				fmt.Sprintf("OVN_NB_DAEMON=%sovn-nbctl.%s.ctl", runner.ovnRunDir,
 					strings.Trim(string(pid), " \n")))
-			logrus.Debugf("using ovn-nbctl daemon mode at %s", envVars)
+			klog.V(5).Infof("using ovn-nbctl daemon mode at %s", envVars)
 			cmdArgs = append(cmdArgs, fmt.Sprintf("--timeout=%d", timeout))
 			cmdArgs = append(cmdArgs, args...)
 			return cmdArgs, envVars
 		}
-		logrus.Warningf("failed to retrieve ovn-nbctl daemon's control socket " +
+		klog.Warningf("failed to retrieve ovn-nbctl daemon's control socket " +
 			"so resorting to non-daemon mode")
+		atomic.AddUint64(&SkippedNbctlDaemonCounter, 1)
 	}
 
 	if config.OvnNorth.Scheme == config.OvnDBSchemeSSL {
@@ -305,7 +360,11 @@ func RunOVNNbctlUnix(args ...string) (string, string, error) {
 // RunOVNNbctlWithTimeout runs command via ovn-nbctl with a specific timeout
 func RunOVNNbctlWithTimeout(timeout int, args ...string) (string, string, error) {
 	cmdArgs, envVars := getNbctlArgsAndEnv(timeout, args...)
+	start := time.Now()
 	stdout, stderr, err := runOVNretry(runner.nbctlPath, envVars, cmdArgs...)
+	if MetricOvnCliLatency != nil {
+		MetricOvnCliLatency.WithLabelValues("ovn-nbctl").Observe(time.Since(start).Seconds())
+	}
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
@@ -343,7 +402,17 @@ func RunOVNSbctlWithTimeout(timeout int, args ...string) (string, string,
 
 	cmdArgs = append(cmdArgs, fmt.Sprintf("--timeout=%d", timeout))
 	cmdArgs = append(cmdArgs, args...)
+	start := time.Now()
 	stdout, stderr, err := runOVNretry(runner.sbctlPath, nil, cmdArgs...)
+	if MetricOvnCliLatency != nil {
+		MetricOvnCliLatency.WithLabelValues("ovn-sbctl").Observe(time.Since(start).Seconds())
+	}
+	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
+}
+
+// RunOVSDBClient runs an 'ovsdb-client [OPTIONS] COMMAND [ARG...] command'.
+func RunOVSDBClient(args ...string) (string, string, error) {
+	stdout, stderr, err := runOVNretry(runner.ovsdbClientPath, nil, args...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
@@ -363,10 +432,10 @@ func RunOVNNBAppCtl(args ...string) (string, string, error) {
 	var cmdArgs []string
 	cmdArgs = []string{
 		"-t",
-		nbdbCtlSockPath,
+		runner.ovnRunDir + nbdbCtlSock,
 	}
 	cmdArgs = append(cmdArgs, args...)
-	stdout, stderr, err := runOVNretry(runner.appctlPath, nil, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, cmdArgs...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
@@ -375,22 +444,28 @@ func RunOVNSBAppCtl(args ...string) (string, string, error) {
 	var cmdArgs []string
 	cmdArgs = []string{
 		"-t",
-		sbdbCtlSockPath,
+		runner.ovnRunDir + sbdbCtlSock,
 	}
 	cmdArgs = append(cmdArgs, args...)
-	stdout, stderr, err := runOVNretry(runner.appctlPath, nil, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, cmdArgs...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
 // RunOVNNorthAppCtl runs an 'ovs-appctl -t ovn-northd command'.
 func RunOVNNorthAppCtl(args ...string) (string, string, error) {
 	var cmdArgs []string
+
+	pid, err := ioutil.ReadFile(runner.ovnRunDir + "ovn-northd.pid")
+	if err != nil {
+		return "", "", fmt.Errorf("failed to run the command since failed to get ovn-northd's pid: %v", err)
+	}
+
 	cmdArgs = []string{
 		"-t",
-		northdCtlSockPath,
+		runner.ovnRunDir + fmt.Sprintf("ovn-northd.%s.ctl", strings.TrimSpace(string(pid))),
 	}
 	cmdArgs = append(cmdArgs, args...)
-	stdout, stderr, err := runOVNretry(runner.appctlPath, nil, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, cmdArgs...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
@@ -444,4 +519,65 @@ func AddNormalActionOFFlow(bridgeName string) (string, string, error) {
 	cmd.SetStdin(stdin)
 	stdout, stderr, err := runCmd(cmd, runner.ofctlPath, args...)
 	return strings.Trim(stdout.String(), "\" \n"), stderr.String(), err
+}
+
+// GetOvnRunDir returns the OVN's rundir.
+func GetOvnRunDir() string {
+	return runner.ovnRunDir
+}
+
+// ovsdb-server(5) says a clustered database is connected if the server
+// is in contact with a majority of its cluster.
+type OVNDBServerStatus struct {
+	Connected bool
+	Leader    bool
+	Index     int
+}
+
+// Internal structure that holds the un-marshaled json output from the
+// ovsdb-client query command. The Index can hold ["set": []] when it is
+// not populated yet, so we need to use `interface{}` type. However, we
+// don't want our callers to worry about all this and we want them to see the
+// Index as an integer and hence we use an exported OVNDBServerStatus for that
+type dbRow struct {
+	Connected bool        `json:"connected"`
+	Leader    bool        `json:"leader"`
+	Index     interface{} `json:"index"`
+}
+
+type queryResult struct {
+	Rows []dbRow `json:"rows"`
+}
+
+func GetOVNDBServerInfo(timeout int, direction, database string) (*OVNDBServerStatus, error) {
+	sockPath := fmt.Sprintf("unix:/var/run/openvswitch/ovn%s_db.sock", direction)
+	transact := fmt.Sprintf(`["_Server", {"op":"select", "table":"Database", "where":[["name", "==", "%s"]], `+
+		`"columns": ["connected", "leader", "index"]}]`, database)
+
+	stdout, stderr, err := RunOVSDBClient(fmt.Sprintf("--timeout=%d", timeout), "query", sockPath, transact)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get %q ovsdb-server status: stderr(%s), err(%v)",
+			direction, stderr, err)
+	}
+
+	var result []queryResult
+	err = json.Unmarshal([]byte(stdout), &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse the json output(%s) from ovsdb-client command for database %q: %v",
+			stdout, database, err)
+	}
+	if len(result) != 1 || len(result[0].Rows) != 1 {
+		return nil, fmt.Errorf("parsed json output for %q ovsdb-server has incorrect status information",
+			direction)
+	}
+	serverStatus := &OVNDBServerStatus{}
+	serverStatus.Connected = result[0].Rows[0].Connected
+	serverStatus.Leader = result[0].Rows[0].Leader
+	if index, ok := result[0].Rows[0].Index.(float64); ok {
+		serverStatus.Index = int(index)
+	} else {
+		serverStatus.Index = 0
+	}
+
+	return serverStatus, nil
 }

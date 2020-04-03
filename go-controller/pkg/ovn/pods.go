@@ -6,10 +6,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
 	util "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	"github.com/sirupsen/logrus"
 	kapi "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/klog"
 )
 
 // Builds the logical switch port name for a given pod.
@@ -23,10 +25,11 @@ func (oc *Controller) syncPods(pods []interface{}) {
 	for _, podInterface := range pods {
 		pod, ok := podInterface.(*kapi.Pod)
 		if !ok {
-			logrus.Errorf("Spurious object in syncPods: %v", podInterface)
+			klog.Errorf("Spurious object in syncPods: %v", podInterface)
 			continue
 		}
-		if podScheduled(pod) && podWantsNetwork(pod) {
+		_, err := util.UnmarshalPodAnnotation(pod.Annotations)
+		if podScheduled(pod) && podWantsNetwork(pod) && err == nil {
 			logicalPort := podLogicalPortName(pod)
 			expectedLogicalPorts[logicalPort] = true
 		}
@@ -36,7 +39,7 @@ func (oc *Controller) syncPods(pods []interface{}) {
 	output, stderr, err := util.RunOVNNbctl("--data=bare", "--no-heading",
 		"--columns=name", "find", "logical_switch_port", "external_ids:pod=true")
 	if err != nil {
-		logrus.Errorf("Error in obtaining list of logical ports, "+
+		klog.Errorf("Error in obtaining list of logical ports, "+
 			"stderr: %q, err: %v",
 			stderr, err)
 		return
@@ -45,115 +48,16 @@ func (oc *Controller) syncPods(pods []interface{}) {
 	for _, existingPort := range existingLogicalPorts {
 		if _, ok := expectedLogicalPorts[existingPort]; !ok {
 			// not found, delete this logical port
-			logrus.Infof("Stale logical port found: %s. This logical port will be deleted.", existingPort)
+			klog.Infof("Stale logical port found: %s. This logical port will be deleted.", existingPort)
 			out, stderr, err := util.RunOVNNbctl("--if-exists", "lsp-del",
 				existingPort)
 			if err != nil {
-				logrus.Errorf("Error in deleting pod's logical port "+
+				klog.Errorf("Error in deleting pod's logical port "+
 					"stdout: %q, stderr: %q err: %v",
 					out, stderr, err)
 			}
-			if !oc.portGroupSupport {
-				oc.deletePodAcls(existingPort)
-			}
 		}
 	}
-}
-
-func (oc *Controller) deletePodAcls(logicalPort string) {
-	// delete the ACL rules on OVN that corresponding pod has been deleted
-	uuids, stderr, err := util.RunOVNNbctl("--data=bare", "--no-heading",
-		"--columns=_uuid", "find", "ACL",
-		fmt.Sprintf("external_ids:logical_port=%s", logicalPort))
-	if err != nil {
-		logrus.Errorf("Error in getting list of acls "+
-			"stdout: %q, stderr: %q, error: %v", uuids, stderr, err)
-		return
-	}
-
-	if uuids == "" {
-		logrus.Debugf("deletePodAcls: returning because find " +
-			"returned no ACLs")
-		return
-	}
-
-	uuidSlice := strings.Fields(uuids)
-	for _, uuid := range uuidSlice {
-		// Get logical switch
-		out, stderr, err := util.RunOVNNbctl("--data=bare",
-			"--no-heading", "--columns=_uuid", "find", "logical_switch",
-			fmt.Sprintf("acls{>=}%s", uuid))
-		if err != nil {
-			logrus.Errorf("find failed to get the logical_switch of acl "+
-				"uuid=%s, stderr: %q, (%v)", uuid, stderr, err)
-			continue
-		}
-
-		if out == "" {
-			continue
-		}
-		logicalSwitch := out
-
-		_, stderr, err = util.RunOVNNbctl("--if-exists", "remove",
-			"logical_switch", logicalSwitch, "acls", uuid)
-		if err != nil {
-			logrus.Errorf("failed to delete the allow-from rule %s for"+
-				" logical_switch=%s, logical_port=%s, stderr: %q, (%v)",
-				uuid, logicalSwitch, logicalPort, stderr, err)
-			continue
-		}
-	}
-}
-
-func (oc *Controller) getLogicalPortUUID(logicalPort string) string {
-	if oc.logicalPortUUIDCache[logicalPort] != "" {
-		return oc.logicalPortUUIDCache[logicalPort]
-	}
-
-	out, stderr, err := util.RunOVNNbctl("--if-exists", "get",
-		"logical_switch_port", logicalPort, "_uuid")
-	if err != nil {
-		logrus.Errorf("Error while getting uuid for logical_switch_port "+
-			"%s, stderr: %q, err: %v", logicalPort, stderr, err)
-		return ""
-	}
-
-	if out == "" {
-		return out
-	}
-
-	oc.logicalPortUUIDCache[logicalPort] = out
-	return oc.logicalPortUUIDCache[logicalPort]
-}
-
-func (oc *Controller) getGatewayFromSwitch(logicalSwitch string) (*net.IPNet, error) {
-	var gatewayIPMaskStr, stderr string
-	var ok bool
-	var err error
-
-	oc.lsMutex.Lock()
-	defer oc.lsMutex.Unlock()
-	if gatewayIPMaskStr, ok = oc.gatewayCache[logicalSwitch]; !ok {
-		gatewayIPMaskStr, stderr, err = util.RunOVNNbctl("--if-exists",
-			"get", "logical_switch", logicalSwitch,
-			"external_ids:gateway_ip")
-		if err != nil {
-			logrus.Errorf("Failed to get gateway IP:  %s, stderr: %q, %v",
-				gatewayIPMaskStr, stderr, err)
-			return nil, err
-		}
-		if gatewayIPMaskStr == "" {
-			return nil, fmt.Errorf("Empty gateway IP in logical switch %s",
-				logicalSwitch)
-		}
-		oc.gatewayCache[logicalSwitch] = gatewayIPMaskStr
-	}
-	ip, ipnet, err := net.ParseCIDR(gatewayIPMaskStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse gateway IP %q: %v", gatewayIPMaskStr, err)
-	}
-	ipnet.IP = ip
-	return ipnet, nil
 }
 
 func (oc *Controller) deleteLogicalPort(pod *kapi.Pod) {
@@ -162,187 +66,291 @@ func (oc *Controller) deleteLogicalPort(pod *kapi.Pod) {
 	}
 
 	podDesc := pod.Namespace + "/" + pod.Name
-	logrus.Infof("Deleting pod: %s", podDesc)
+	klog.Infof("Deleting pod: %s", podDesc)
+
 	logicalPort := podLogicalPortName(pod)
-	out, stderr, err := util.RunOVNNbctl("--if-exists", "lsp-del",
-		logicalPort)
+	portInfo, err := oc.logicalPortCache.get(logicalPort)
 	if err != nil {
-		logrus.Errorf("Error in deleting pod %s logical port "+
+		klog.Errorf(err.Error())
+		return
+	}
+
+	// Remove the port from the default deny multicast policy
+	if oc.multicastSupport {
+		if err := podDeleteDefaultDenyMulticastPolicy(portInfo); err != nil {
+			klog.Errorf(err.Error())
+		}
+	}
+
+	if err := oc.deletePodFromNamespace(pod.Namespace, portInfo); err != nil {
+		klog.Errorf(err.Error())
+	}
+
+	out, stderr, err := util.RunOVNNbctl("--if-exists", "lsp-del", logicalPort)
+	if err != nil {
+		klog.Errorf("Error in deleting pod %s logical port "+
 			"stdout: %q, stderr: %q, (%v)",
 			podDesc, out, stderr, err)
 	}
 
-	var podIP net.IP
-	podAnnotation, err := util.UnmarshalPodAnnotation(pod.Annotations)
-	if err != nil {
-		logrus.Debugf("failed to read pod %s annotation when deleting "+
-			"logical port; falling back to PodIP %s: %v",
-			podDesc, pod.Status.PodIP, err)
-		podIP = net.ParseIP(pod.Status.PodIP)
-	} else {
-		podIP = podAnnotation.IP.IP
-	}
-
-	delete(oc.logicalPortCache, logicalPort)
-
-	oc.lspMutex.Lock()
-	delete(oc.lspIngressDenyCache, logicalPort)
-	delete(oc.lspEgressDenyCache, logicalPort)
-	delete(oc.logicalPortUUIDCache, logicalPort)
-	oc.lspMutex.Unlock()
-
-	if !oc.portGroupSupport {
-		oc.deleteACLDenyOld(pod.Namespace, pod.Spec.NodeName, logicalPort,
-			"Ingress")
-		oc.deleteACLDenyOld(pod.Namespace, pod.Spec.NodeName, logicalPort,
-			"Egress")
-	}
-	oc.deletePodFromNamespace(pod.Namespace, podIP, logicalPort)
+	oc.logicalPortCache.remove(logicalPort)
 }
 
-func (oc *Controller) waitForNodeLogicalSwitch(nodeName string) error {
-	oc.lsMutex.Lock()
-	ok := oc.logicalSwitchCache[nodeName]
-	oc.lsMutex.Unlock()
-	// Fast return if we already have the node switch in our cache
-	if ok {
-		return nil
-	}
-
-	// Otherwise wait for the node logical switch to be created by the ClusterController.
-	// The node switch will be created very soon after startup so we should
-	// only be waiting here once per node at most.
-	if err := wait.PollImmediate(500*time.Millisecond, 30*time.Second, func() (bool, error) {
-		if _, _, err := util.RunOVNNbctl("get", "logical_switch", nodeName, "other-config"); err != nil {
-			return false, nil
-		}
-		return true, nil
+func (oc *Controller) waitForNodeLogicalSwitch(nodeName string) (*net.IPNet, error) {
+	// Wait for the node logical switch to be created by the ClusterController.
+	// The node switch will be created when the node's logical network infrastructure
+	// is created by the node watch.
+	var subnet *net.IPNet
+	if err := wait.PollImmediate(10*time.Millisecond, 30*time.Second, func() (bool, error) {
+		oc.lsMutex.Lock()
+		defer oc.lsMutex.Unlock()
+		var ok bool
+		subnet, ok = oc.logicalSwitchCache[nodeName]
+		return ok, nil
 	}); err != nil {
-		logrus.Errorf("timed out waiting for node %q logical switch: %v", nodeName, err)
-		return err
+		return nil, fmt.Errorf("timed out waiting for logical switch %q subnet: %v", nodeName, err)
+	}
+	return subnet, nil
+}
+
+func getPodAddresses(portName string) (net.HardwareAddr, net.IP, bool, error) {
+	podMac, podIP, err := util.GetPortAddresses(portName)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if podMac == nil || podIP == nil {
+		// wait longer
+		return nil, nil, false, nil
+	}
+	return podMac, podIP, true, nil
+}
+
+func waitForPodAddresses(portName string) (net.HardwareAddr, net.IP, error) {
+	var (
+		podMac net.HardwareAddr
+		podIP  net.IP
+		done   bool
+		err    error
+	)
+
+	// First try to get the pod addresses quickly then fall back to polling every second.
+	err = wait.PollImmediate(50*time.Millisecond, 300*time.Millisecond, func() (bool, error) {
+		podMac, podIP, done, err = getPodAddresses(portName)
+		return done, err
+	})
+	if err == wait.ErrWaitTimeout {
+		err = wait.PollImmediate(time.Second, 30*time.Second, func() (bool, error) {
+			podMac, podIP, done, err = getPodAddresses(portName)
+			return done, err
+		})
 	}
 
-	oc.lsMutex.Lock()
-	defer oc.lsMutex.Unlock()
-	if !oc.logicalSwitchCache[nodeName] {
-		if err := oc.addAllowACLFromNode(nodeName); err != nil {
-			return err
-		}
-		oc.logicalSwitchCache[nodeName] = true
+	if err != nil || podMac == nil || podIP == nil {
+		return nil, nil, fmt.Errorf("Error while obtaining addresses for %s: %v", portName, err)
 	}
-	return nil
+
+	return podMac, podIP, nil
+}
+
+func getRoutesGatewayIP(pod *kapi.Pod, gatewayIPnet *net.IPNet) ([]util.PodRoute, net.IP, error) {
+	// if there are other network attachments for the pod, then check if those network-attachment's
+	// annotation has default-route key. If present, then we need to skip adding default route for
+	// OVN interface
+	networks, err := util.GetPodNetSelAnnotation(pod, util.NetworkAttachmentAnnotation)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error while getting network attachment definition for [%s/%s]: %v",
+			pod.Namespace, pod.Name, err)
+	}
+	otherDefaultRoute := false
+	for _, network := range networks {
+		if len(network.GatewayRequest) != 0 && network.GatewayRequest[0] != nil {
+			otherDefaultRoute = true
+			break
+		}
+	}
+	var gatewayIP net.IP
+	routes := make([]util.PodRoute, 0)
+	if otherDefaultRoute {
+		for _, clusterSubnet := range config.Default.ClusterSubnets {
+			var route util.PodRoute
+			route.Dest = clusterSubnet.CIDR
+			route.NextHop = gatewayIPnet.IP
+			routes = append(routes, route)
+		}
+		for _, serviceSubnet := range config.Kubernetes.ServiceCIDRs {
+			var route util.PodRoute
+			route.Dest = serviceSubnet
+			route.NextHop = gatewayIPnet.IP
+			routes = append(routes, route)
+		}
+	} else {
+		gatewayIP = gatewayIPnet.IP
+	}
+
+	if gatewayIP != nil && len(config.HybridOverlay.ClusterSubnets) > 0 {
+		// Add a route for each hybrid overlay subnet via the hybrid
+		// overlay port on the pod's logical switch.
+		second := util.NextIP(gatewayIP)
+		thirdIP := util.NextIP(second)
+		for _, subnet := range config.HybridOverlay.ClusterSubnets {
+			routes = append(routes, util.PodRoute{
+				Dest:    subnet.CIDR,
+				NextHop: thirdIP,
+			})
+		}
+	}
+
+	return routes, gatewayIP, nil
 }
 
 func (oc *Controller) addLogicalPort(pod *kapi.Pod) error {
 	var out, stderr string
 	var err error
 
+	// If a node does node have an assigned hostsubnet don't wait for the logical switch to appear
+	if val, ok := oc.logicalSwitchCache[pod.Spec.NodeName]; ok && val == nil {
+		return nil
+	}
+
 	// Keep track of how long syncs take.
 	start := time.Now()
 	defer func() {
-		logrus.Infof("[%s/%s] addLogicalPort took %v", pod.Namespace, pod.Name, time.Since(start))
+		klog.Infof("[%s/%s] addLogicalPort took %v", pod.Namespace, pod.Name, time.Since(start))
 	}()
 
 	logicalSwitch := pod.Spec.NodeName
-	if err = oc.waitForNodeLogicalSwitch(pod.Spec.NodeName); err != nil {
+	nodeSubnet, err := oc.waitForNodeLogicalSwitch(pod.Spec.NodeName)
+	if err != nil {
 		return err
 	}
 
 	portName := podLogicalPortName(pod)
-	logrus.Debugf("Creating logical port for %s on switch %s", portName, logicalSwitch)
-
-	annotation, err := util.UnmarshalPodAnnotation(pod.Annotations)
-	annotationsSet := (err == nil)
-	// If pod already has annotations, just add the lsp with static ip/mac.
-	// Else, create the lsp with dynamic addresses.
-	if err == nil {
-		out, stderr, err = util.RunOVNNbctl("--may-exist", "lsp-add",
-			logicalSwitch, portName, "--", "lsp-set-addresses", portName,
-			fmt.Sprintf("%s %s", annotation.MAC, annotation.IP.IP), "--", "set",
-			"logical_switch_port", portName,
-			"external-ids:namespace="+pod.Namespace,
-			"external-ids:logical_switch="+logicalSwitch,
-			"external-ids:pod=true", "--", "--if-exists",
-			"clear", "logical_switch_port", portName, "dynamic_addresses")
-		if err != nil {
-			return fmt.Errorf("Failed to add logical port to switch "+
-				"stdout: %q, stderr: %q (%v)",
-				out, stderr, err)
-		}
-	} else {
-		out, stderr, err = util.RunOVNNbctl("--wait=sb", "--",
-			"--may-exist", "lsp-add", logicalSwitch, portName,
-			"--", "lsp-set-addresses",
-			portName, "dynamic", "--", "set",
-			"logical_switch_port", portName,
-			"external-ids:namespace="+pod.Namespace,
-			"external-ids:logical_switch="+logicalSwitch,
-			"external-ids:pod=true")
-		if err != nil {
-			return fmt.Errorf("Error while creating logical port %s "+
-				"stdout: %q, stderr: %q (%v)",
-				portName, out, stderr, err)
-		}
-	}
-
-	oc.logicalPortCache[portName] = logicalSwitch
-
-	gatewayIP, err := oc.getGatewayFromSwitch(logicalSwitch)
-	if err != nil {
-		return fmt.Errorf("Error obtaining gateway address for switch %s", logicalSwitch)
-	}
+	klog.V(5).Infof("Creating logical port for %s on switch %s", portName, logicalSwitch)
 
 	var podMac net.HardwareAddr
-	var podIP net.IP
-	count := 30
-	for count > 0 {
-		podMac, podIP, err = util.GetPortAddresses(portName)
-		if err == nil && podMac != nil && podIP != nil {
-			break
+	var podCIDR *net.IPNet
+	var gatewayCIDR *net.IPNet
+	var args []string
+
+	annotation, err := util.UnmarshalPodAnnotation(pod.Annotations)
+	if err == nil {
+		podMac = annotation.MAC
+		podCIDR = annotation.IP
+		gatewayCIDR = &net.IPNet{IP: annotation.GW, Mask: annotation.IP.Mask}
+
+		// Check if the pod's logical switch port already exists. If it
+		// does don't re-add the port to OVN as this will change its
+		// UUID and and the port cache, address sets, and port groups
+		// will still have the old UUID.
+		out, _, err = util.RunOVNNbctl("--if-exists", "get", "logical_switch_port", portName, "_uuid")
+		if err != nil || !strings.Contains(out, "-") {
+			// Pod's logical switch port does not yet exist
+			args = []string{"lsp-add", logicalSwitch, portName}
 		}
+
+		// If the pod already has annotations use the existing static
+		// IP/MAC from the annotation.
+		args = append(args,
+			"--", "lsp-set-addresses", portName, fmt.Sprintf("%s %s", podMac, annotation.IP.IP),
+			"--", "--if-exists", "clear", "logical_switch_port", portName, "dynamic_addresses",
+		)
+	} else {
+		gatewayCIDR, _ = util.GetNodeWellKnownAddresses(nodeSubnet)
+
+		addresses := "dynamic"
+		networks, err := util.GetPodNetSelAnnotation(pod, util.DefNetworkAnnotation)
+		if err != nil || (networks != nil && len(networks) != 1) {
+			return fmt.Errorf("error while getting custom MAC config for port %q from "+
+				"default-network's network-attachment: %v", portName, err)
+		} else if networks != nil && networks[0].MacRequest != "" {
+			klog.V(5).Infof("Pod %s/%s requested custom MAC: %s", pod.Namespace, pod.Name, networks[0].MacRequest)
+			addresses = networks[0].MacRequest + " dynamic"
+		}
+
+		// If it has no annotations, let OVN assign it IP and MAC addresses
+		args = []string{
+			"--may-exist", "lsp-add", logicalSwitch, portName,
+			"--", "lsp-set-addresses", portName, addresses,
+		}
+	}
+	args = append(args, "--", "set", "logical_switch_port", portName, "external-ids:namespace="+pod.Namespace, "external-ids:pod=true")
+
+	out, stderr, err = util.RunOVNNbctl(args...)
+	if err != nil {
+		return fmt.Errorf("Error while creating logical port %s stdout: %q, stderr: %q (%v)",
+			portName, out, stderr, err)
+	}
+
+	// If the pod has not already been assigned addresses, read them now
+	if podMac == nil || podCIDR == nil {
+		var podIP net.IP
+		podMac, podIP, err = waitForPodAddresses(portName)
 		if err != nil {
-			return fmt.Errorf("Error while obtaining addresses for %s - %v", portName, err)
+			return err
 		}
-		time.Sleep(time.Second)
-		count--
-	}
-	if count == 0 {
-		return fmt.Errorf("Error while obtaining addresses for %s "+
-			"stdout: %q, stderr: %q, (%v)", portName, out, stderr, err)
+		podCIDR = &net.IPNet{IP: podIP, Mask: nodeSubnet.Mask}
 	}
 
-	podCIDR := &net.IPNet{IP: podIP, Mask: gatewayIP.Mask}
+	// UUID must be retrieved separately from the lsp-add transaction since
+	// (as of OVN 2.12) a bogus UUID is returned if they are part of the same
+	// transaction.
+	// FIXME: move to the lsp-add transaction once https://bugzilla.redhat.com/show_bug.cgi?id=1806788
+	// is resolved.
+	var uuid string
+	uuid, _, err = util.RunOVNNbctl("get", "logical_switch_port", portName, "_uuid")
+	if err != nil {
+		return fmt.Errorf("error while getting UUID for logical port %s "+
+			"stdout: %q, stderr: %q (%v)", portName, uuid, stderr, err)
+	}
+	if !strings.Contains(uuid, "-") {
+		return fmt.Errorf("invalid logical port %s uuid %q", portName, uuid)
+	}
 
-	// now set the port security for the logical switch port
-	out, stderr, err = util.RunOVNNbctl("lsp-set-port-security", portName,
-		fmt.Sprintf("%s %s", podMac, podCIDR))
+	// Add the pod's logical switch port to the port cache
+	portInfo := oc.logicalPortCache.add(logicalSwitch, portName, uuid, podMac, podCIDR.IP)
+
+	// Set the port security for the logical switch port
+	addresses := fmt.Sprintf("%s %s", podMac, podCIDR.IP)
+	out, stderr, err = util.RunOVNNbctl("lsp-set-port-security", portName, addresses)
 	if err != nil {
 		return fmt.Errorf("error while setting port security for logical port %s "+
 			"stdout: %q, stderr: %q (%v)", portName, out, stderr, err)
 	}
 
-	marshalledAnnotation, err := util.MarshalPodAnnotation(&util.PodAnnotation{
-		IP:  podCIDR,
-		MAC: podMac,
-		GW:  gatewayIP.IP,
-	})
-	if err != nil {
-		return fmt.Errorf("error creating pod network annotation: %v", err)
+	// Enforce the default deny multicast policy
+	if oc.multicastSupport {
+		if err := podAddDefaultDenyMulticastPolicy(portInfo); err != nil {
+			return err
+		}
 	}
 
-	oc.addPodToNamespace(pod.Namespace, podIP, portName)
-
-	logrus.Debugf("Annotation values: ip=%s ; mac=%s ; gw=%s\nAnnotation=%s",
-		podCIDR, podMac, gatewayIP, marshalledAnnotation)
-	err = oc.kube.SetAnnotationsOnPod(pod, marshalledAnnotation)
-	if err != nil {
-		return fmt.Errorf("failed to set annotation on pod %s - %v", pod.Name, err)
+	if err := oc.addPodToNamespace(pod.Namespace, portInfo); err != nil {
+		return err
 	}
 
-	// If we're setting the annotation for the first time, observe the creation
-	// latency metric.
-	if !annotationsSet {
-		recordPodCreated(pod)
+	if annotation == nil {
+		routes, gwIP, err := getRoutesGatewayIP(pod, gatewayCIDR)
+		if err != nil {
+			return err
+		}
+		marshalledAnnotation, err := util.MarshalPodAnnotation(&util.PodAnnotation{
+			IP:     podCIDR,
+			MAC:    podMac,
+			GW:     gwIP,
+			Routes: routes,
+		})
+		if err != nil {
+			return fmt.Errorf("error creating pod network annotation: %v", err)
+		}
+
+		klog.V(5).Infof("Annotation values: ip=%s ; mac=%s ; gw=%s\nAnnotation=%s",
+			podCIDR, podMac, gwIP, marshalledAnnotation)
+		if err = oc.kube.SetAnnotationsOnPod(pod, marshalledAnnotation); err != nil {
+			return fmt.Errorf("failed to set annotation on pod %s: %v", pod.Name, err)
+		}
+
+		// observe the pod creation latency metric.
+		metrics.RecordPodCreated(pod)
 	}
 
 	return nil

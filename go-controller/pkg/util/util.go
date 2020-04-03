@@ -4,9 +4,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
+	"sync"
 
-	"github.com/sirupsen/logrus"
+	houtil "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/util"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
+
 	"github.com/urfave/cli"
+	"k8s.io/klog"
+)
+
+// K8sMgmtIntfName name to be used as an OVS internal port on the node
+const (
+	K8sMgmtIntfName = "ovn-k8s-mp0"
 )
 
 // StringArg gets the named command-line argument or returns an error if it is empty
@@ -18,9 +28,8 @@ func StringArg(context *cli.Context, name string) (string, error) {
 	return val, nil
 }
 
-// GetK8sMgmtIntfName returns the correct length interface name to be used
-// as an OVS internal port on the node
-func GetK8sMgmtIntfName(nodeName string) string {
+// GetLegacyK8sMgmtIntfName returns legacy management ovs-port name
+func GetLegacyK8sMgmtIntfName(nodeName string) string {
 	if len(nodeName) > 11 {
 		return "k8s-" + (nodeName[:11])
 	}
@@ -32,7 +41,7 @@ func GetNodeChassisID() (string, error) {
 	chassisID, stderr, err := RunOVSVsctl("--if-exists", "get",
 		"Open_vSwitch", ".", "external_ids:system-id")
 	if err != nil {
-		logrus.Errorf("No system-id configured in the local host, "+
+		klog.Errorf("No system-id configured in the local host, "+
 			"stderr: %q, error: %v", stderr, err)
 		return "", err
 	}
@@ -43,9 +52,73 @@ func GetNodeChassisID() (string, error) {
 	return chassisID, nil
 }
 
+var updateNodeSwitchLock sync.Mutex
+
+// UpdateNodeSwitchExcludeIPs should be called after adding the management port
+// and after adding the hybrid overlay port, and ensures that each port's IP
+// is added to the logical switch's exclude_ips. This prevents ovn-northd log
+// spam about duplicate IP addresses.
+// See https://github.com/ovn-org/ovn-kubernetes/pull/779
+func UpdateNodeSwitchExcludeIPs(nodeName string, subnet *net.IPNet) error {
+	if config.IPv6Mode {
+		// We don't exclude any IPs in IPv6
+		return nil
+	}
+
+	updateNodeSwitchLock.Lock()
+	defer updateNodeSwitchLock.Unlock()
+
+	stdout, stderr, err := RunOVNNbctl("lsp-list", nodeName)
+	if err != nil {
+		return fmt.Errorf("failed to list logical switch %q ports: stderr: %q, error: %v", nodeName, stderr, err)
+	}
+
+	var haveManagementPort, haveHybridOverlayPort bool
+	lines := strings.Split(stdout, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "(k8s-"+nodeName+")") {
+			haveManagementPort = true
+		} else if strings.Contains(line, "("+houtil.GetHybridOverlayPortName(nodeName)+")") {
+			haveHybridOverlayPort = true
+		}
+	}
+
+	_, managementPortCIDR := GetNodeWellKnownAddresses(subnet)
+	var excludeIPs string
+	if config.HybridOverlay.Enabled {
+		hybridOverlayIP := NextIP(managementPortCIDR.IP)
+		if haveHybridOverlayPort && haveManagementPort {
+			// no excluded IPs required
+		} else if !haveHybridOverlayPort && !haveManagementPort {
+			// exclude both
+			excludeIPs = managementPortCIDR.IP.String() + ".." + hybridOverlayIP.String()
+		} else if haveHybridOverlayPort {
+			// exclude management port IP
+			excludeIPs = managementPortCIDR.IP.String()
+		} else if haveManagementPort {
+			// exclude hybrid overlay port IP
+			excludeIPs = hybridOverlayIP.String()
+		}
+	} else if !haveManagementPort {
+		// exclude management port IP
+		excludeIPs = managementPortCIDR.IP.String()
+	}
+
+	args := []string{"--", "--if-exists", "remove", "logical_switch", nodeName, "other-config", "exclude_ips"}
+	if len(excludeIPs) > 0 {
+		args = []string{"--", "--if-exists", "set", "logical_switch", nodeName, "other-config:exclude_ips=" + excludeIPs}
+	}
+
+	_, stderr, err = RunOVNNbctl(args...)
+	if err != nil {
+		return fmt.Errorf("failed to set node %q switch exclude_ips, "+
+			"stderr: %q, error: %v", nodeName, stderr, err)
+	}
+	return nil
+}
+
 const (
-	// OvnPodAnnotationLegacyName is the old POD annotation key string, kept for backward compatibility only
-	OvnPodAnnotationLegacyName = "ovn"
 	// OvnPodAnnotationName is the constant string representing the POD annotation key
 	OvnPodAnnotationName = "k8s.ovn.org/pod-networks"
 	// OvnPodDefaultNetwork is the constant string representing the first OVN interface to the Pod
@@ -109,49 +182,33 @@ func MarshalPodAnnotation(podInfo *PodAnnotation) (map[string]string, error) {
 		})
 	}
 
-	// We need to annotate pod with both the legacy and new annotation name. This is in case
-	// if there are some nodes that have not been upgraded to understand the new Pod annotation
-	bytes, err := json.Marshal(pa)
-	if err != nil {
-		logrus.Errorf("failed marshaling podAnnotation structure %v", pa)
-		return nil, err
-	}
-	legacyValue := string(bytes)
 	podNetworks := map[string]podAnnotation{
 		OvnPodDefaultNetwork: pa,
 	}
-	bytes, err = json.Marshal(podNetworks)
+	bytes, err := json.Marshal(podNetworks)
 	if err != nil {
-		logrus.Errorf("failed marshaling podNetworks map %v", podNetworks)
+		klog.Errorf("failed marshaling podNetworks map %v", podNetworks)
 		return nil, err
 	}
 	return map[string]string{
-		OvnPodAnnotationLegacyName: legacyValue,
-		OvnPodAnnotationName:       string(bytes),
+		OvnPodAnnotationName: string(bytes),
 	}, nil
 }
 
 // UnmarshalPodAnnotation returns a the unmarshalled pod annotation
 func UnmarshalPodAnnotation(annotations map[string]string) (*PodAnnotation, error) {
-	a := &podAnnotation{}
-
 	ovnAnnotation, ok := annotations[OvnPodAnnotationName]
 	if !ok {
-		ovnAnnotation, ok = annotations[OvnPodAnnotationLegacyName]
-		if !ok {
-			return nil, fmt.Errorf("could not find OVN pod annotation in %v", annotations)
-		}
-		if err := json.Unmarshal([]byte(ovnAnnotation), a); err != nil {
-			return nil, err
-		}
-	} else {
-		podNetworks := make(map[string]podAnnotation)
-		if err := json.Unmarshal([]byte(ovnAnnotation), &podNetworks); err != nil {
-			return nil, err
-		}
-		tempA := podNetworks[OvnPodDefaultNetwork]
-		a = &tempA
+		return nil, fmt.Errorf("could not find OVN pod annotation in %v", annotations)
 	}
+
+	podNetworks := make(map[string]podAnnotation)
+	if err := json.Unmarshal([]byte(ovnAnnotation), &podNetworks); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal ovn pod annotation %q: %v",
+			ovnAnnotation, err)
+	}
+	tempA := podNetworks[OvnPodDefaultNetwork]
+	a := &tempA
 
 	podAnnotation := &PodAnnotation{}
 	// Minimal validation

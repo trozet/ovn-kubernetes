@@ -87,6 +87,10 @@ func (s service) baseCmds(fexec *ovntest.FakeExec, service v1.Service) {
 	fexec.AddFakeCmdsNoOutputNoError([]string{
 		"ovn-nbctl --timeout=15 --if-exists remove load_balancer udp_load_balancer_id_1 vips \"172.30.0.10:53\"",
 	})
+	fexec.AddFakeCmdsNoOutputNoError([]string{
+		fmt.Sprintf("ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find logical_switch load_balancer{>=}k8s_tcp_load_balancer"),
+		fmt.Sprintf("ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_router load_balancer{>=}k8s_tcp_load_balancer"),
+	})
 }
 
 func (s service) addCmds(fexec *ovntest.FakeExec, service v1.Service) {
@@ -96,21 +100,32 @@ func (s service) addCmds(fexec *ovntest.FakeExec, service v1.Service) {
 func (s service) delCmds(fexec *ovntest.FakeExec, service v1.Service) {
 	for _, port := range service.Spec.Ports {
 		fexec.AddFakeCmdsNoOutputNoError([]string{
-			fmt.Sprintf("ovn-nbctl --timeout=15 remove load_balancer %s vips \"%s:%v\"", k8sTCPLoadBalancerIP, service.Spec.ClusterIP, port.Port),
+			fmt.Sprintf("ovn-nbctl --timeout=15 --if-exists remove load_balancer %s vips \"%s:%v\"", k8sTCPLoadBalancerIP, service.Spec.ClusterIP, port.Port),
 		})
 	}
 }
 
 var _ = Describe("OVN Namespace Operations", func() {
-	var app *cli.App
+	var (
+		app     *cli.App
+		fakeOvn *FakeOVN
+		fExec   *ovntest.FakeExec
+	)
 
 	BeforeEach(func() {
 		// Restore global default values before each testcase
-		config.RestoreDefaultConfig()
+		config.PrepareTestConfig()
 
 		app = cli.NewApp()
 		app.Name = "test"
 		app.Flags = config.Flags
+
+		fExec = ovntest.NewFakeExec()
+		fakeOvn = NewFakeOVN(fExec)
+	})
+
+	AfterEach(func() {
+		fakeOvn.shutdown()
 	})
 
 	Context("on startup", func() {
@@ -129,11 +144,9 @@ var _ = Describe("OVN Namespace Operations", func() {
 					v1.ServiceTypeClusterIP,
 				)
 
-				fExec := ovntest.NewFakeExec()
 				test.baseCmds(fExec, service)
 
-				fakeOvn := FakeOVN{}
-				fakeOvn.start(ctx, fExec,
+				fakeOvn.start(ctx,
 					&v1.ServiceList{
 						Items: []v1.Service{
 							service,
@@ -144,7 +157,7 @@ var _ = Describe("OVN Namespace Operations", func() {
 
 				_, err := fakeOvn.fakeClient.CoreV1().Services(service.Namespace).Get(service.Name, metav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
-				Expect(fExec.CalledMatchesExpected()).To(BeTrue())
+				Expect(fExec.CalledMatchesExpected()).To(BeTrue(), fExec.ErrorDesc)
 
 				return nil
 			}
@@ -167,11 +180,9 @@ var _ = Describe("OVN Namespace Operations", func() {
 					v1.ServiceTypeClusterIP,
 				)
 
-				fExec := ovntest.NewFakeExec()
 				test.baseCmds(fExec, service)
 
-				fakeOvn := FakeOVN{}
-				fakeOvn.start(ctx, fExec,
+				fakeOvn.start(ctx,
 					&v1.ServiceList{
 						Items: []v1.Service{
 							service,
@@ -182,12 +193,12 @@ var _ = Describe("OVN Namespace Operations", func() {
 
 				_, err := fakeOvn.fakeClient.CoreV1().Services(service.Namespace).Get(service.Name, metav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
-				Expect(fExec.CalledMatchesExpected()).To(BeTrue())
+				Expect(fExec.CalledMatchesExpected()).To(BeTrue(), fExec.ErrorDesc)
 
 				test.delCmds(fExec, service)
 				err = fakeOvn.fakeClient.CoreV1().Services(service.Namespace).Delete(service.Name, metav1.NewDeleteOptions(0))
 				Expect(err).NotTo(HaveOccurred())
-				Eventually(fExec.CalledMatchesExpected).Should(BeTrue())
+				Eventually(fExec.CalledMatchesExpected).Should(BeTrue(), fExec.ErrorDesc)
 
 				s, err := fakeOvn.fakeClient.CoreV1().Services(service.Namespace).Get(service.Name, metav1.GetOptions{})
 				Expect(err).To(HaveOccurred())

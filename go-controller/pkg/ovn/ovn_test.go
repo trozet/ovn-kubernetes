@@ -14,19 +14,29 @@ import (
 const (
 	k8sTCPLoadBalancerIP = "k8s_tcp_load_balancer"
 	k8sUDPLoadBalancerIP = "k8s_udp_load_balancer"
+
+	fakeUUID = "8a86f6d8-7972-4253-b0bd-ddbef66e9303"
 )
 
 type FakeOVN struct {
 	fakeClient *fake.Clientset
 	watcher    *factory.WatchFactory
 	controller *Controller
+	stopChan   chan struct{}
+	fakeExec   *ovntest.FakeExec
 }
 
-func (o *FakeOVN) start(ctx *cli.Context, fexec *ovntest.FakeExec, objects ...runtime.Object) {
+func NewFakeOVN(fexec *ovntest.FakeExec) *FakeOVN {
 	err := util.SetExec(fexec)
 	Expect(err).NotTo(HaveOccurred())
 
-	_, err = config.InitConfig(ctx, fexec, nil)
+	return &FakeOVN{
+		fakeExec: fexec,
+	}
+}
+
+func (o *FakeOVN) start(ctx *cli.Context, objects ...runtime.Object) {
+	_, err := config.InitConfig(ctx, o.fakeExec, nil)
 	Expect(err).NotTo(HaveOccurred())
 
 	o.fakeClient = fake.NewSimpleClientset(objects...)
@@ -34,17 +44,21 @@ func (o *FakeOVN) start(ctx *cli.Context, fexec *ovntest.FakeExec, objects ...ru
 }
 
 func (o *FakeOVN) restart() {
-	o.watcher.Shutdown()
+	o.shutdown()
 	o.init()
+}
+
+func (o *FakeOVN) shutdown() {
+	close(o.stopChan)
 }
 
 func (o *FakeOVN) init() {
 	var err error
 
-	o.watcher, err = factory.NewWatchFactory(o.fakeClient, make(chan struct{}))
+	o.stopChan = make(chan struct{})
+	o.watcher, err = factory.NewWatchFactory(o.fakeClient, o.stopChan)
 	Expect(err).NotTo(HaveOccurred())
 
-	o.controller = NewOvnController(o.fakeClient, o.watcher)
-	o.controller.portGroupSupport = true
+	o.controller = NewOvnController(o.fakeClient, o.watcher, o.stopChan)
 	o.controller.multicastSupport = true
 }
