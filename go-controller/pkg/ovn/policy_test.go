@@ -384,6 +384,7 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 		It("reconciles an existing gress networkPolicy with a pod selector in its own namespace", func() {
 			app.Action = func(ctx *cli.Context) error {
 
+				npTest := networkPolicy{}
 				nTest := namespace{}
 
 				namespace1 := *newNamespace("namespace1")
@@ -432,6 +433,7 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				nTest.baseCmds(fExec, namespace1)
 				nTest.addCmdsWithPods(fExec, nPodTest, namespace1)
 				nPodTest.addPodDenyMcast(fExec)
+				npTest.addPodSelectorCmds(fExec, nPodTest, networkPolicy, true, false)
 
 				fakeOvn.start(ctx,
 					&v1.NamespaceList{
@@ -452,8 +454,8 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				)
 				nPodTest.populateLogicalSwitchCache(fakeOvn)
 
-				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNamespaces()
+				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNetworkPolicy()
 
 				_, err := fakeOvn.fakeClient.NetworkingV1().NetworkPolicies(networkPolicy.Namespace).Get(networkPolicy.Name, metav1.GetOptions{})
@@ -470,6 +472,7 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 		It("reconciles an existing gress networkPolicy with a pod and namespace selector in another namespace", func() {
 			app.Action = func(ctx *cli.Context) error {
 
+				npTest := networkPolicy{}
 				nTest := namespace{}
 
 				namespace1 := *newNamespace("namespace1")
@@ -530,6 +533,7 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				nTest.addCmds(fExec, namespace1)
 				nTest.addCmdsWithPods(fExec, nPodTest, namespace2)
 				nPodTest.addPodDenyMcast(fExec)
+				npTest.addPodSelectorCmds(fExec, nPodTest, networkPolicy, false, false)
 
 				fakeOvn.start(ctx,
 					&v1.NamespaceList{
@@ -551,8 +555,8 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				)
 				nPodTest.populateLogicalSwitchCache(fakeOvn)
 
-				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNamespaces()
+				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNetworkPolicy()
 
 				_, err := fakeOvn.fakeClient.NetworkingV1().NetworkPolicies(networkPolicy.Namespace).Get(networkPolicy.Name, metav1.GetOptions{})
@@ -647,8 +651,8 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				)
 				nPodTest.populateLogicalSwitchCache(fakeOvn)
 
-				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNamespaces()
+				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNetworkPolicy()
 
 				_, err := fakeOvn.fakeClient.NetworkingV1().NetworkPolicies(networkPolicy.Namespace).Get(networkPolicy.Name, metav1.GetOptions{})
@@ -816,6 +820,7 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				nTest.baseCmds(fExec, namespace1)
 				nTest.addCmdsWithPods(fExec, nPodTest, namespace1)
 				nPodTest.addPodDenyMcast(fExec)
+				npTest.addPodSelectorCmds(fExec, nPodTest, networkPolicy, true, false)
 
 				fakeOvn.start(ctx,
 					&v1.NamespaceList{
@@ -836,8 +841,8 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				)
 				nPodTest.populateLogicalSwitchCache(fakeOvn)
 
-				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNamespaces()
+				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNetworkPolicy()
 
 				_, err := fakeOvn.fakeClient.NetworkingV1().NetworkPolicies(networkPolicy.Namespace).Get(networkPolicy.Name, metav1.GetOptions{})
@@ -923,6 +928,8 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				nTest.addCmds(fExec, namespace1)
 				nTest.addCmdsWithPods(fExec, nPodTest, namespace2)
 				nPodTest.addPodDenyMcast(fExec)
+				npTest.addPodSelectorCmds(fExec, nPodTest, networkPolicy, false, false)
+
 
 				fakeOvn.start(ctx,
 					&v1.NamespaceList{
@@ -944,8 +951,8 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				)
 				nPodTest.populateLogicalSwitchCache(fakeOvn)
 
-				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNamespaces()
+				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNetworkPolicy()
 
 				_, err := fakeOvn.fakeClient.NetworkingV1().NetworkPolicies(networkPolicy.Namespace).Get(networkPolicy.Name, metav1.GetOptions{})
@@ -1019,6 +1026,7 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				nTest.baseCmds(fExec, namespace1)
 				nTest.addCmdsWithPods(fExec, nPodTest, namespace1)
 				nPodTest.addPodDenyMcast(fExec)
+				npTest.addPodSelectorCmds(fExec, nPodTest, networkPolicy, true, false)
 
 				fakeOvn.start(ctx,
 					&v1.NamespaceList{
@@ -1039,8 +1047,8 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				)
 				nPodTest.populateLogicalSwitchCache(fakeOvn)
 
-				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNamespaces()
+				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNetworkPolicy()
 
 				_, err := fakeOvn.fakeClient.NetworkingV1().NetworkPolicies(networkPolicy.Namespace).Get(networkPolicy.Name, metav1.GetOptions{})
@@ -1141,8 +1149,8 @@ var _ = Describe("OVN NetworkPolicy Operations", func() {
 				)
 				nPodTest.populateLogicalSwitchCache(fakeOvn)
 
-				fakeOvn.controller.WatchPods()
 				fakeOvn.controller.WatchNamespaces()
+				fakeOvn.controller.WatchPods()
 				ns, err := fakeOvn.fakeClient.CoreV1().Namespaces().Get(
 					namespace1.Name, metav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
