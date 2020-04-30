@@ -3,6 +3,7 @@ package util
 import (
 	"bytes"
 	"fmt"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	kapi "k8s.io/api/core/v1"
 	"net"
 	"sort"
@@ -15,12 +16,16 @@ import (
 const (
 	// PhysicalNetworkName is the name that maps to an OVS bridge that provides
 	// access to physical/external network
-	PhysicalNetworkName = "physnet"
+	PhysicalNetworkName      = "physnet"
+	HybridGatewayNetworkName = "hybrid"
 	// OvnClusterRouter is the name of the distributed router
 	OvnClusterRouter     = "ovn_cluster_router"
 	JoinSwitchPrefix     = "join_"
 	ExternalSwitchPrefix = "ext_"
 	GWRouterPrefix       = "GR_"
+	HybridSwitchPrefix   = "hybrid_"
+	HybridSwitchToRouter = "htor-"
+	HybridRouterToSwitch = "rtoh-"
 )
 
 // GetK8sClusterRouter returns back the OVN distributed router. This is meant to be used on the
@@ -202,6 +207,27 @@ func GatewayInit(clusterIPSubnet []*net.IPNet, hostSubnet *net.IPNet, joinSubnet
 			return fmt.Errorf("failed to add a static route in GR %s with distributed "+
 				"router as the nexthop, stdout: %q, stderr: %q, error: %v",
 				gatewayRouter, stdout, stderr, err)
+		}
+	}
+
+	if config.HybridOverlay.Enabled && config.HybridOverlay.NsGwModeEnabled {
+		hybridSwitch := HybridSwitchPrefix + nodeName
+		// create the per-node hybrid switch
+		stdout, stderr, err = RunOVNNbctl("--", "--may-exist", "ls-add", hybridSwitch)
+		if err != nil {
+			return fmt.Errorf("failed to create logical switch %q, stdout: %q, stderr: %q, error: %v",
+				hybridSwitch, stdout, stderr, err)
+		}
+
+		// add physnet switch port
+		stdout, stderr, err = RunOVNNbctl(
+			"--", "--may-exist", "lsp-add", hybridSwitch, "hybrid",
+			"--", "set", "logical_switch_port", "hybrid", "type=localnet",
+			fmt.Sprintf("options:network_name=%s", HybridGatewayNetworkName),
+			"addresses=unknown")
+		if err != nil {
+			return fmt.Errorf("failed to add port %q to logical switch %q, "+
+				"stdout: %q, stderr: %q, error: %v", "hybrid", hybridSwitch, stdout, stderr, err)
 		}
 	}
 

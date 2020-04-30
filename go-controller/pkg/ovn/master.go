@@ -115,6 +115,12 @@ func (oc *Controller) StartClusterMaster(masterNodeName string) error {
 	_, joinSubnetCIDR, _ := net.ParseCIDR(joinSubnet)
 	_ = oc.joinSubnetAllocator.AddNetworkRange(joinSubnetCIDR, 3)
 
+	if config.HybridOverlay.Enabled {
+		hybridJoinSubnet := config.V4JoinSubnet
+		_, hybridJoinSubnetCIDR, _ := net.ParseCIDR(hybridJoinSubnet)
+		_ = oc.joinSubnetAllocator.AddNetworkRange(hybridJoinSubnetCIDR, 3)
+	}
+
 	existingNodes, err := oc.kube.GetNodes()
 	if err != nil {
 		klog.Errorf("Error in initializing/fetching subnets: %v", err)

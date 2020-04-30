@@ -90,6 +90,7 @@ const (
 	configSubnetCluster configSubnetType = "cluster subnet"
 	configSubnetService configSubnetType = "service subnet"
 	configSubnetHybrid  configSubnetType = "hybrid overlay subnet"
+	configSubnetHybridJoin configSubnetType = " build-in join hybrid subnet"
 )
 
 type configSubnet struct {

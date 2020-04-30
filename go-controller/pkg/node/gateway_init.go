@@ -37,8 +37,12 @@ func bridgedGatewayNodeSetup(nodeName, bridgeName, bridgeInterface string, syncB
 
 	// ovn-bridge-mappings maps a physical network name to a local ovs bridge
 	// that provides connectivity to that network.
+	bridgeMappings := fmt.Sprintf("%s:%s", util.PhysicalNetworkName, bridgeName)
+	if config.HybridOverlay.Enabled && config.HybridOverlay.NsGwModeEnabled {
+		bridgeMappings += fmt.Sprintf(",%s:%s", util.HybridGatewayNetworkName, "br-ext")
+	}
 	_, stderr, err := util.RunOVSVsctl("set", "Open_vSwitch", ".",
-		fmt.Sprintf("external_ids:ovn-bridge-mappings=%s:%s", util.PhysicalNetworkName, bridgeName))
+		fmt.Sprintf("external_ids:ovn-bridge-mappings=%s", bridgeMappings))
 	if err != nil {
 		return "", nil, fmt.Errorf("Failed to set ovn-bridge-mappings for ovs bridge %s"+
 			", stderr:%s (%v)", bridgeName, stderr, err)

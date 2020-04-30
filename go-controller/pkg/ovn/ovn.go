@@ -74,6 +74,7 @@ type Controller struct {
 
 	masterSubnetAllocator *allocator.SubnetAllocator
 	joinSubnetAllocator   *allocator.SubnetAllocator
+	hybridSubnetAllocator *allocator.SubnetAllocator
 
 	TCPLoadBalancerUUID  string
 	UDPLoadBalancerUUID  string

@@ -747,7 +747,7 @@ ovn-master() {
 
   hybrid_overlay_flags=
   if [[ -n "${ovn_hybrid_overlay_enable}" ]]; then
-    hybrid_overlay_flags="--enable-hybrid-overlay"
+    hybrid_overlay_flags="--enable-hybrid-overlay --namespace-gateway-mode"
     if [[ -n "${ovn_hybrid_overlay_net_cidr}" ]]; then
       hybrid_overlay_flags="${hybrid_overlay_flags} --hybrid-overlay-cluster-subnets=${ovn_hybrid_overlay_net_cidr}"
     fi
@@ -848,7 +848,7 @@ ovn-node() {
 
   hybrid_overlay_flags=
   if [[ -n "${ovn_hybrid_overlay_enable}" ]]; then
-    hybrid_overlay_flags="--enable-hybrid-overlay"
+    hybrid_overlay_flags="--enable-hybrid-overlay --namespace-gateway-mode"
   fi
 
   OVN_ENCAP_IP=""

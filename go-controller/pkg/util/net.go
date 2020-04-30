@@ -126,3 +126,30 @@ func IPAddrToHWAddr(ip net.IP) net.HardwareAddr {
 	// IPv6 - use the first two and last two bytes.
 	return net.HardwareAddr{0x0A, 0x58, ip[0], ip[1], ip[14], ip[15]}
 }
+
+// ReverseIPAddress reverses IP address by octet
+func ReverseIPAddress(ip string) string {
+	for i := 0; i < len(ip); i++ {
+		switch ip[i] {
+		case '.':
+			return reverse(ip)
+		case ':':
+			return "" // implement ipv6 later
+		}
+	}
+
+	return ""
+}
+
+func reverse(ip string) string {
+	slice := strings.Split(ip, ".")
+	for i := 0; i < len(slice)/2; i++ {
+		j := len(slice) - i - 1
+		slice[i], slice[j] = slice[j], slice[i]
+	}
+	revIP := net.ParseIP(strings.Join(slice, ".")).To4()
+	if revIP == nil {
+		return ""
+	}
+	return revIP.String()
+}

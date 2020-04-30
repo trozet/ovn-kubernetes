@@ -31,6 +31,7 @@ const DefaultAPIServer = "http://localhost:8443"
 
 // IP address range from which subnet is allocated for per-node join switch
 const (
+	V4HybridSubnet = "100.65.0.0/16"
 	V4JoinSubnet = "100.64.0.0/16"
 	V6JoinSubnet = "fd98::/64"
 )
@@ -245,7 +246,8 @@ type HybridOverlayConfig struct {
 	RawClusterSubnets string `gcfg:"cluster-subnets"`
 	// ClusterSubnets holds parsed hybrid overlay cluster subnet entries and
 	// may be used outside the config module.
-	ClusterSubnets []CIDRNetworkEntry
+	ClusterSubnets  []CIDRNetworkEntry
+	NsGwModeEnabled bool `gfcg:"namespace-gw-mode"`
 }
 
 // OvnDBScheme describes the OVN database connection transport method
@@ -753,6 +755,12 @@ var HybridOverlayFlags = []cli.Flag{
 			"hostsubnetlength defines how many IP addresses are dedicated to each node.",
 		Destination: &cliConfig.HybridOverlay.RawClusterSubnets,
 	},
+	&cli.BoolFlag{
+		Name: "namespace-gateway-mode",
+		Usage: "Enables namespace gateway mode, which will route traffic to different VXLAN endpoints" +
+			"defined in namespace annotations as k8s.ovn.org/hybrid-overlay-external-gw annotation",
+		Destination: &cliConfig.HybridOverlay.NsGwModeEnabled,
+	},
 }
 
 // Flags are general command-line flags. Apps should add these flags to their
@@ -1030,6 +1038,8 @@ func buildHybridOverlayConfig(ctx *cli.Context, cli, file *config, allSubnets *c
 	}
 
 	if HybridOverlay.Enabled {
+		//hack REMOVE trozet
+		HybridOverlay.NsGwModeEnabled = true
 		var err error
 		HybridOverlay.ClusterSubnets, err = ParseClusterSubnetEntries(HybridOverlay.RawClusterSubnets)
 		if err != nil {
@@ -1038,6 +1048,7 @@ func buildHybridOverlayConfig(ctx *cli.Context, cli, file *config, allSubnets *c
 		for _, subnet := range HybridOverlay.ClusterSubnets {
 			allSubnets.append(configSubnetHybrid, subnet.CIDR)
 		}
+		allSubnets.appendConst(configSubnetHybridJoin, V4HybridSubnet)
 	}
 
 	return nil
