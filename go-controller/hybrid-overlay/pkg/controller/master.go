@@ -102,6 +102,7 @@ func (m *MasterController) releaseNodeSubnet(nodeName string, subnet *net.IPNet)
 
 func (m *MasterController) handleOverlayPort(node *kapi.Node, annotator kube.Annotator) error {
 	_, haveDRMACAnnotation := node.Annotations[types.HybridOverlayDRMAC]
+	_, haveDRIPAnnotation := node.Annotations[types.HybridOverlayDRIP]
 
 	subnet, err := util.ParseNodeHostSubnetAnnotation(node)
 	if subnet == nil || err != nil {
@@ -109,11 +110,12 @@ func (m *MasterController) handleOverlayPort(node *kapi.Node, annotator kube.Ann
 		if haveDRMACAnnotation {
 			m.deleteOverlayPort(node)
 			annotator.Delete(types.HybridOverlayDRMAC)
+			annotator.Delete(types.HybridOverlayDRIP)
 		}
 		return nil
 	}
 
-	if haveDRMACAnnotation {
+	if haveDRMACAnnotation && haveDRIPAnnotation {
 		// already set up; do nothing
 		return nil
 	}
@@ -132,7 +134,7 @@ func (m *MasterController) handleOverlayPort(node *kapi.Node, annotator kube.Ann
 
 		var stderr string
 		_, stderr, err = util.RunOVNNbctl("--", "--may-exist", "lsp-add", node.Name, portName,
-			"--", "lsp-set-addresses", portName, portMAC.String()+" "+portIP.String())
+			"--", "lsp-set-addresses", portName, portMAC.String())
 		if err != nil {
 			return fmt.Errorf("failed to add hybrid overlay port for node %s"+
 				", stderr:%s: %v", node.Name, stderr, err)
@@ -144,6 +146,9 @@ func (m *MasterController) handleOverlayPort(node *kapi.Node, annotator kube.Ann
 	}
 	if err := annotator.Set(types.HybridOverlayDRMAC, portMAC.String()); err != nil {
 		return fmt.Errorf("failed to set node %s hybrid overlay DRMAC annotation: %v", node.Name, err)
+	}
+	if err := annotator.Set(types.HybridOverlayDRIP, portIP.String()); err != nil {
+		return fmt.Errorf("failed to set node %s hybrid overlay DRIP annotation: %v", node.Name, err)
 	}
 
 	return nil

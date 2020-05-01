@@ -27,9 +27,10 @@ func StartNode(nodeName string, kube kube.Interface, wf *factory.WatchFactory) e
 
 // nodeChanged returns true if any relevant node attributes changed
 func nodeChanged(node1 *kapi.Node, node2 *kapi.Node) bool {
-	cidr1, nodeIP1, drMAC1, _ := getNodeDetails(node1)
-	cidr2, nodeIP2, drMAC2, _ := getNodeDetails(node2)
-	return !reflect.DeepEqual(cidr1, cidr2) || !reflect.DeepEqual(nodeIP1, nodeIP2) || !reflect.DeepEqual(drMAC1, drMAC2)
+	cidr1, nodeIP1, drMAC1, drIP1, _ := getNodeDetails(node1)
+	cidr2, nodeIP2, drMAC2, drIP2, _ := getNodeDetails(node2)
+	return !reflect.DeepEqual(cidr1, cidr2) || !reflect.DeepEqual(nodeIP1, nodeIP2) ||
+		!reflect.DeepEqual(drMAC1, drMAC2) || !reflect.DeepEqual(drIP1, drIP2)
 }
 
 // getNodeSubnetAndIP returns the node's hybrid overlay subnet and the node's
@@ -65,20 +66,29 @@ func getNodeSubnetAndIP(node *kapi.Node) (*net.IPNet, net.IP) {
 // getNodeDetails returns the node's hybrid overlay subnet, first InternalIP,
 // and the distributed router MAC (DRMAC), or nil if any of the addresses are
 // missing or invalid.
-func getNodeDetails(node *kapi.Node) (*net.IPNet, net.IP, net.HardwareAddr, error) {
+func getNodeDetails(node *kapi.Node) (*net.IPNet, net.IP, net.HardwareAddr, net.IP, error) {
 	cidr, ip := getNodeSubnetAndIP(node)
 	if cidr == nil || ip == nil {
-		return nil, nil, nil, fmt.Errorf("missing node subnet and/or node IP")
+		return nil, nil, nil, nil, fmt.Errorf("missing node subnet and/or node IP")
 	}
 
 	drMACString, ok := node.Annotations[types.HybridOverlayDRMAC]
 	if !ok {
-		return nil, nil, nil, fmt.Errorf("missing distributed router MAC annotation")
+		return nil, nil, nil, nil, fmt.Errorf("missing distributed router MAC annotation")
 	}
 	drMAC, err := net.ParseMAC(drMACString)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("invalid distributed router MAC %q: %v", drMACString, err)
+		return nil, nil, nil, nil, fmt.Errorf("invalid distributed router MAC %q: %v", drMACString, err)
 	}
 
-	return cidr, ip, drMAC, nil
+	drIPString, ok := node.Annotations[types.HybridOverlayDRIP]
+	if !ok {
+		return nil, nil, nil, nil, fmt.Errorf("missing distributed router MAC annotation")
+	}
+	drIP := net.ParseIP(drIPString)
+	if drIP == nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to parse DRIP: %s", drIPString)
+	}
+
+	return cidr, ip, drMAC, drIP, nil
 }
