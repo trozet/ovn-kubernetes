@@ -153,6 +153,7 @@ func (oc *Controller) AddNamespace(ns *kapi.Namespace) {
 	}
 
 	nsInfo.hybridOverlayExternalGw = ns.GetAnnotations()[hotypes.HybridOverlayExternalGw]
+	nsInfo.hybridOverlayVTEP = ns.GetAnnotations()[hotypes.HybridOverlayVTEP]
 
 	// Create an address_set for the namespace.  All the pods' IP address
 	// in the namespace will be added to the address_set
@@ -243,6 +244,7 @@ func (oc *Controller) createNamespaceLocked(ns string) *namespaceInfo {
 		addressSet:              make(map[string]string),
 		networkPolicies:         make(map[string]*namespacePolicy),
 		hybridOverlayExternalGw: "",
+		hybridOverlayVTEP:       "",
 		multicastEnabled:        false,
 	}
 	nsInfo.Lock()
