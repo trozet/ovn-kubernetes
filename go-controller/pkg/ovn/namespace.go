@@ -153,6 +153,7 @@ func (oc *Controller) AddNamespace(ns *kapi.Namespace) {
 	}
 
 	nsInfo.hybridOverlayExternalGw = ns.GetAnnotations()[hotypes.HybridOverlayExternalGw]
+	nsInfo.hybridOverlayVTEP = ns.GetAnnotations()[hotypes.HybridOverlayVTEP]
 
 	// Create an address_set for the namespace.  All the pods' IP address
 	// in the namespace will be added to the address_set
@@ -172,6 +173,7 @@ func (oc *Controller) updateNamespace(old, newer *kapi.Namespace) {
 	defer nsInfo.Unlock()
 
 	nsInfo.hybridOverlayExternalGw = newer.GetAnnotations()[hotypes.HybridOverlayExternalGw]
+	nsInfo.hybridOverlayVTEP = newer.GetAnnotations()[hotypes.HybridOverlayVTEP]
 	oc.multicastUpdateNamespace(newer, nsInfo)
 }
 

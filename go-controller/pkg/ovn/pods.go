@@ -185,17 +185,20 @@ func getRoutesGatewayIP(pod *kapi.Pod, subnet *net.IPNet, hybridOverlayExternalG
 			routes = append(routes, route)
 		}
 		if hybridOverlayExternalGw != "" {
-			if net.ParseIP(hybridOverlayExternalGw) == nil {
+			hybridGwIP := net.ParseIP(hybridOverlayExternalGw)
+			if hybridGwIP == nil {
 				return nil, nil, fmt.Errorf("could not parse hybrid external gw annotation: %v", err)
 			}
 			// We use .3 as gateway as the namespace contains hybridOverlayExternalGw annotation for. The value of the annotation
 			// will be used in the hybrid overlay code for setting the outer destination on VXLAN packets
-			gatewayIP = util.GetNodeHybridOverlayIfAddr(subnet).IP
+			//gatewayIP = util.GetNodeHybridOverlayIfAddr(subnet).IP
+			gatewayIP = hybridGwIP
 		}
 	} else {
 		gatewayIP = gatewayIPnet.IP
 	}
 
+	/**
 	if gatewayIP != nil && len(config.HybridOverlay.ClusterSubnets) > 0 {
 		// Add a route for each hybrid overlay subnet via the hybrid
 		// overlay port on the pod's logical switch.
@@ -208,6 +211,7 @@ func getRoutesGatewayIP(pod *kapi.Pod, subnet *net.IPNet, hybridOverlayExternalG
 			})
 		}
 	}
+	*/
 	return routes, gatewayIP, nil
 }
 
@@ -350,6 +354,7 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) error {
 				return err
 			}
 		}
+
 		routes, gwIP, err := getRoutesGatewayIP(pod, nodeSubnet, hybridOverlayExternalGw)
 		if err != nil {
 			return err

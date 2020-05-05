@@ -14,6 +14,7 @@ const (
 	HybridOverlayDRIP  = HybridOverlayAnnotationBase + "distributed-router-gateway-ip"
 	// HybridOverlayExternalGW is a namespace annotation that holds the IP address of the external gateway to route default traffic
 	HybridOverlayExternalGw = HybridOverlayAnnotationBase + "external-gw"
+	HybridOverlayVTEP       = HybridOverlayAnnotationBase + "vtep"
 
 	// HybridOverlayVNI is the VNI for VXLAN tunnels between nodes/endpoints
 	HybridOverlayVNI = 4097
