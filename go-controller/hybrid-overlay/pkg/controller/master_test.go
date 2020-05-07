@@ -33,7 +33,7 @@ func addGetPortAddressesCmds(fexec *ovntest.FakeExec, nodeName, hybMAC, hybIP st
 	})
 }
 
-func newTestNode(name, os, ovnHostSubnet, hybridHostSubnet, drMAC string) v1.Node {
+func newTestNode(name, os, ovnHostSubnet, hybridHostSubnet, drMAC string, drIP string) v1.Node {
 	annotations := make(map[string]string)
 	if ovnHostSubnet != "" {
 		subnetAnnotations, err := util.CreateNodeHostSubnetAnnotation(ovntest.MustParseIPNet(ovnHostSubnet))
@@ -47,6 +47,7 @@ func newTestNode(name, os, ovnHostSubnet, hybridHostSubnet, drMAC string) v1.Nod
 	}
 	if drMAC != "" {
 		annotations[types.HybridOverlayDRMAC] = drMAC
+		annotations[types.HybridOverlayDRIP] = drIP
 	}
 	return v1.Node{
 		ObjectMeta: metav1.ObjectMeta{
@@ -70,7 +71,6 @@ var _ = Describe("Hybrid SDN Master Operations", func() {
 	})
 
 	const hybridOverlayClusterCIDR string = "11.1.0.0/16/24"
-
 	It("allocates and assigns a hybrid-overlay subnet to a Windows node that doesn't have one", func() {
 		app.Action = func(ctx *cli.Context) error {
 			const (
@@ -80,7 +80,7 @@ var _ = Describe("Hybrid SDN Master Operations", func() {
 
 			fakeClient := fake.NewSimpleClientset(&v1.NodeList{
 				Items: []v1.Node{
-					newTestNode(nodeName, "windows", "", "", ""),
+					newTestNode(nodeName, "windows", "", "", "", ""),
 				},
 			})
 
@@ -129,7 +129,7 @@ var _ = Describe("Hybrid SDN Master Operations", func() {
 
 			fakeClient := fake.NewSimpleClientset(&v1.NodeList{
 				Items: []v1.Node{
-					newTestNode(nodeName, "linux", nodeSubnet, "", ""),
+					newTestNode(nodeName, "linux", nodeSubnet, "", "", ""),
 				},
 			})
 
@@ -186,7 +186,7 @@ var _ = Describe("Hybrid SDN Master Operations", func() {
 
 			fakeClient := fake.NewSimpleClientset(&v1.NodeList{
 				Items: []v1.Node{
-					newTestNode(nodeName, "linux", nodeSubnet, "", nodeHOMAC),
+					newTestNode(nodeName, "linux", nodeSubnet, "", nodeHOMAC, nodeHOIP),
 				},
 			})
 

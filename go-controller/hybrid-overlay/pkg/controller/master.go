@@ -110,7 +110,9 @@ func (m *MasterController) handleOverlayPort(node *kapi.Node, annotator kube.Ann
 		if haveDRMACAnnotation {
 			m.deleteOverlayPort(node)
 			annotator.Delete(types.HybridOverlayDRMAC)
-			annotator.Delete(types.HybridOverlayDRIP)
+			if haveDRIPAnnotation {
+				annotator.Delete(types.HybridOverlayDRIP)
+			}
 		}
 		return nil
 	}
