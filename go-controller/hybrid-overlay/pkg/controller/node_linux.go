@@ -28,8 +28,11 @@ const (
 )
 
 type flowCacheEntry struct {
-	flows   []string
+	flows []string
+	// true if table 20 flow has been learned from the switch
 	learned bool
+	// ignore learn on next flow sync for this entry
+	ignoreLearn bool
 }
 
 // NodeController is the node hybrid overlay controller
@@ -46,8 +49,9 @@ type NodeController struct {
 	// flow cache map of cookies to flows
 	flowCache map[string]*flowCacheEntry
 	flowMutex sync.Mutex
-	flowChan  chan bool
-	stopChan  <-chan struct{}
+	// channel to indicate we need to update flows immediately. Can pass cookie to ignore learning for that cookie
+	flowChan chan bool
+	stopChan <-chan struct{}
 }
 
 // NewNode returns a node handler that listens for node events
@@ -94,7 +98,7 @@ func (n *NodeController) waitForNamespace(name string) (*kapi.Namespace, error) 
 	return namespace, nil
 }
 
-func (n *NodeController) addOrUpdatePod(pod *kapi.Pod) error {
+func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 	podIPs, podMAC, err := getPodDetails(pod, n.nodeName)
 	if err != nil {
 		klog.V(5).Infof("cleaning up hybrid overlay pod %s/%s because %v", pod.Namespace, pod.Name, err)
@@ -118,12 +122,8 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod) error {
 			return fmt.Errorf("failed to ensure hybrid overlay in pod handler: %v", err)
 		}
 	}
-	if len(n.drMAC) == 0 {
-		return fmt.Errorf("empty value found for DRMAC on node: %s", n.nodeName)
-	}
-
-	if len(n.drIP) == 0 {
-		return fmt.Errorf("empty value found for DRIP on node: %s", n.nodeName)
+	if n.drMAC == nil || n.drIP == nil {
+		return fmt.Errorf("empty values for DR MAC: %s or DR IP: %s on node %s", n.drMAC, n.drIP, n.nodeName)
 	}
 	var flows []string
 	for _, podIP := range podIPs {
@@ -137,11 +137,6 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod) error {
 			klog.Infof("Skipping hybrid overlay gw mode setup for pod %s, namespace does not have hybrid"+
 				"annotations, external gw: %s, VTEP: %s", pod.Name, namespaceExternalGw, namespaceVTEP)
 			break
-		}
-
-		portName := houtil.GetHybridOverlayPortName(n.nodeName)
-		if n.drMAC == nil || n.drIP == nil {
-			return fmt.Errorf("unable to get addresses for %s", portName)
 		}
 
 		portMACRaw := strings.Replace(n.drMAC.String(), ":", "", -1)
@@ -211,8 +206,12 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod) error {
 
 	n.flowMutex.Lock()
 	n.flowCache[cookie] = &flowCacheEntry{flows: flows}
+	if ignoreLearn {
+		n.flowCache[cookie].ignoreLearn = true
+	}
 	n.flowMutex.Unlock()
 	n.flowChan <- true
+
 	klog.Infof("Pod %s wired for Hybrid Overlay", pod.Name)
 	return nil
 }
@@ -278,6 +277,19 @@ func podChanged(pod1 *kapi.Pod, pod2 *kapi.Pod, nodeName string) bool {
 	return false
 }
 
+// nsHybridAnnotationChanged returns true if any relevant NS attributes changed
+func nsHybridAnnotationChanged(ns1 *kapi.Namespace, ns2 *kapi.Namespace) bool {
+	nsExGw1 := ns1.GetAnnotations()[hotypes.HybridOverlayExternalGw]
+	nsVTEP1 := ns1.GetAnnotations()[hotypes.HybridOverlayVTEP]
+	nsExGw2 := ns2.GetAnnotations()[hotypes.HybridOverlayExternalGw]
+	nsVTEP2 := ns2.GetAnnotations()[hotypes.HybridOverlayVTEP]
+
+	if nsExGw1 != nsExGw2 || nsVTEP1 != nsVTEP2 {
+		return true
+	}
+	return false
+}
+
 // Start is the top level function to run hybrid-sdn in node mode
 func (n *NodeController) Start(wf *factory.WatchFactory) error {
 	// sync flows
@@ -299,6 +311,10 @@ func (n *NodeController) Start(wf *factory.WatchFactory) error {
 		return err
 	}
 
+	if err := n.startNamespaceWatch(wf); err != nil {
+		return err
+	}
+
 	return n.startPodWatch(wf)
 }
 
@@ -307,7 +323,7 @@ func (n *NodeController) startPodWatch(wf *factory.WatchFactory) error {
 	_, err := wf.AddPodHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			pod := obj.(*kapi.Pod)
-			if err := n.addOrUpdatePod(pod); err != nil {
+			if err := n.addOrUpdatePod(pod, false); err != nil {
 				klog.Warningf("failed to handle pod %v addition: %v", pod, err)
 			}
 		},
@@ -315,7 +331,7 @@ func (n *NodeController) startPodWatch(wf *factory.WatchFactory) error {
 			podNew := newer.(*kapi.Pod)
 			podOld := old.(*kapi.Pod)
 			if podChanged(podOld, podNew, n.nodeName) {
-				if err := n.addOrUpdatePod(podNew); err != nil {
+				if err := n.addOrUpdatePod(podNew, false); err != nil {
 					klog.Warningf("failed to handle pod %v update: %v", podNew, err)
 				}
 			}
@@ -325,6 +341,38 @@ func (n *NodeController) startPodWatch(wf *factory.WatchFactory) error {
 			if err := n.deletePod(pod); err != nil {
 				klog.Warningf("failed to handle pod %v deletion: %v", pod, err)
 			}
+		},
+	}, nil)
+	return err
+}
+
+func (n *NodeController) startNamespaceWatch(wf *factory.WatchFactory) error {
+	n.wf = wf
+	_, err := wf.AddNamespaceHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			// dont care about namespace addition, we already wait for the annotation
+		},
+		UpdateFunc: func(old, newer interface{}) {
+			nsNew := newer.(*kapi.Namespace)
+			nsOld := old.(*kapi.Namespace)
+
+			if nsHybridAnnotationChanged(nsOld, nsNew) {
+				pods, err := wf.GetPods(nsNew.Namespace)
+				if err != nil {
+					klog.Errorf("failed to get pods for NS update in hybrid overlay: %v", err)
+				}
+				for _, pod := range pods {
+					// we need to ignore learning cookie flow from table 20 during this pod update
+					// this is because the VTEP/GW may have changed, and now we need to get rid of the
+					// corresponding table 20 flow and not cache it
+					if err := n.addOrUpdatePod(pod, true); err != nil {
+						klog.Warningf("failed to handle pod %v update: %v", pod, err)
+					}
+				}
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			// dont care about namespace delete, pod flows will be deleted upon pod deletion
 		},
 	}, nil)
 	return err
@@ -631,6 +679,14 @@ func (n *NodeController) syncFlows() {
 			// we only ever have one learned flow per pod, so if we already cached it, we dont need to do it again
 			if cacheEntry.learned {
 				klog.V(5).Infof("Ignoring flow to add to hybrid cache as it is already learned: %s", line)
+				continue
+			}
+			// we ignore certain cookies for learning to avoid a case where a NS was updated with a new vtep
+			// and we accidentally pick up the old vtep flow and cache it. This should only ever happen on a pod update
+			// with an NS annotation VTEP change. We only need to ignore it for one iteration of sync.
+			if cacheEntry.ignoreLearn {
+				klog.V(5).Infof("Ignoring learned flow to add to hybrid cache for this iteration: %s", line)
+				cacheEntry.ignoreLearn = false
 				continue
 			}
 			klog.Infof("Learned flow added to hybrid flow cache: %s", line)
