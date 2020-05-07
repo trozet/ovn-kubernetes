@@ -27,6 +27,11 @@ const (
 	extVXLANName  string = "ext-vxlan"
 )
 
+type flowCacheEntry struct {
+	flows   []string
+	learned bool
+}
+
 // NodeController is the node hybrid overlay controller
 type NodeController struct {
 	kube        kube.Interface
@@ -38,6 +43,11 @@ type NodeController struct {
 	// contains a map of pods to corresponding tunnels
 	tunMap      map[string]string
 	tunMapMutex sync.Mutex
+	// flow cache map of cookies to flows
+	flowCache map[string]*flowCacheEntry
+	flowMutex sync.Mutex
+	flowChan  chan bool
+	stopChan  <-chan struct{}
 }
 
 // NewNode returns a node handler that listens for node events
@@ -45,12 +55,16 @@ type NodeController struct {
 // It initializes the node it is currently running on. On Linux, this means:
 //  1. Setting up a VXLAN gateway and hooking to the OVN gateway
 //  2. Setting back annotations about its VTEP and gateway MAC address to its own object
-func NewNode(kube kube.Interface, nodeName string) (*NodeController, error) {
+func NewNode(kube kube.Interface, nodeName string, stopChan <-chan struct{}) (*NodeController, error) {
 	node := &NodeController{
 		kube:        kube,
 		nodeName:    nodeName,
 		tunMap:      make(map[string]string),
 		tunMapMutex: sync.Mutex{},
+		flowCache:   make(map[string]*flowCacheEntry),
+		flowMutex:   sync.Mutex{},
+		flowChan:    make(chan bool),
+		stopChan:    stopChan,
 	}
 	return node, nil
 }
@@ -154,12 +168,19 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod) error {
 					cookie, pod, portMACRaw, hotypes.HybridOverlayVNI, vtepIPRaw)
 			}
 		}
-		n.tunMapMutex.Unlock()
+
 		// for arp response from vxlan, learn and add flow to table 20, for pod-> vxlan traffic
-		flows = append(flows,
+		// special cookie needed here for tunnel
+		// tunnel cookie flows only contain a single flow ever, but it is updated by multiple pod adds
+		// so need proper locking around tunMap
+		tunCookie := nameToCookie(namespaceVTEP)
+		n.flowMutex.Lock()
+		n.flowCache[tunCookie] = &flowCacheEntry{flows: []string{
 			fmt.Sprintf("table=0,cookie=0x%s,priority=120,in_port=%s,arp,arp_spa=%s,tun_src=%s,"+
 				"actions=%s",
-				cookie, extVXLANName, namespaceExternalGw, namespaceVTEP, learnActions))
+				cookie, extVXLANName, namespaceExternalGw, namespaceVTEP, learnActions)}}
+		n.flowMutex.Unlock()
+		n.tunMapMutex.Unlock()
 
 		// add flow to table 0 to match on incoming traffic from pods, send to table 20
 		// bypass regular Hybrid overlay for gateway mode
@@ -187,12 +208,11 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod) error {
 				cookie, podIP.IP, n.drMAC.String(), n.drMAC.String(), n.drIP, namespaceExternalGw, hotypes.HybridOverlayVNI,
 				namespaceVTEP, extVXLANName))
 	}
-	for _, flow := range flows {
-		_, _, err = util.RunOVSOfctl("add-flow", extBridgeName, flow)
-		if err != nil {
-			return fmt.Errorf("failed to add flow: %s for pod %s/%s: %v", flow, pod.Namespace, pod.Name, err)
-		}
-	}
+
+	n.flowMutex.Lock()
+	n.flowCache[cookie] = &flowCacheEntry{flows: flows}
+	n.flowMutex.Unlock()
+	n.flowChan <- true
 	klog.Infof("Pod %s wired for Hybrid Overlay", pod.Name)
 	return nil
 }
@@ -203,14 +223,29 @@ func (n *NodeController) deletePod(pod *kapi.Pod) error {
 		if err != nil {
 			return fmt.Errorf("error getting pod details: %v", err)
 		}
+		var tunIP string
 		n.tunMapMutex.Lock()
 		for _, podIP := range podIPs {
+			// need to check if any pods in the tunMap still correspond to a tunnel
+			// store the tunIP so we can delete cookie later
+			tunIP = n.tunMap[podIP.IP.String()]
 			delete(n.tunMap, podIP.IP.String())
 		}
-		n.tunMapMutex.Unlock()
-		if err := deleteFlowsByCookie(podToCookie(pod)); err != nil {
-			return fmt.Errorf("failed to delete flows for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		if len(tunIP) > 0 {
+			// check if any pods still belong to this tunnel so we can clean up the flow if not
+			tunStillActive := false
+			for _, tun := range n.tunMap {
+				if tunIP == tun {
+					tunStillActive = true
+					break
+				}
+			}
+			if !tunStillActive {
+				n.deleteFlowsByCookie(nameToCookie(tunIP))
+			}
 		}
+		n.tunMapMutex.Unlock()
+		n.deleteFlowsByCookie(podToCookie(pod))
 	}
 	return nil
 }
@@ -243,56 +278,23 @@ func podChanged(pod1 *kapi.Pod, pod2 *kapi.Pod, nodeName string) bool {
 	return false
 }
 
-func (n *NodeController) syncPods(pods []interface{}) {
-	kubePods := make(map[string]bool)
-	for _, tmp := range pods {
-		pod, ok := tmp.(*kapi.Pod)
-		if !ok {
-			klog.Errorf("Spurious object in syncPods: %v", tmp)
-			continue
-		}
-		kubePods[podToCookie(pod)] = true
-	}
-
-	stdout, stderr, err := util.RunOVSOfctl("dump-flows", extBridgeName, "table=10")
-	if err != nil {
-		klog.Errorf("failed to dump flows for %s: stderr: %q, error: %v", extBridgeName, stderr, err)
-		return
-	}
-
-	// Find all flows that exist in br-ext that are for pods not present
-	// in the Kube pod list
-	lines := strings.Split(stdout, "\n")
-	cookiesToRemove := make(map[string]bool)
-	for _, line := range lines {
-		// Ignore the end-of-table drop rule
-		if strings.Contains(line, "actions=drop") {
-			continue
-		}
-
-		parts := strings.Split(line, ",")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			const cookieTag string = "cookie=0x"
-			if !strings.HasPrefix(part, cookieTag) {
-				continue
-			}
-			cookie := part[len(cookieTag):]
-			if _, ok := kubePods[cookie]; !ok {
-				cookiesToRemove[cookie] = true
-			}
-		}
-	}
-
-	for cookie := range cookiesToRemove {
-		if err := deleteFlowsByCookie(cookie); err != nil {
-			klog.Errorf("failed clean stale hybrid overlay pod flow %q: %v", cookie, err)
-		}
-	}
-}
-
 // Start is the top level function to run hybrid-sdn in node mode
 func (n *NodeController) Start(wf *factory.WatchFactory) error {
+	// sync flows
+	go func() {
+		klog.Info("Started hybrid overlay OpenFlow sync thread")
+		for {
+			select {
+			case <-time.After(30 * time.Second):
+				n.syncFlows()
+			case <-n.flowChan:
+				n.syncFlows()
+			case <-n.stopChan:
+				break
+			}
+		}
+	}()
+
 	if err := n.startNodeWatch(wf); err != nil {
 		return err
 	}
@@ -324,8 +326,12 @@ func (n *NodeController) startPodWatch(wf *factory.WatchFactory) error {
 				klog.Warningf("failed to handle pod %v deletion: %v", pod, err)
 			}
 		},
-	}, n.syncPods)
+	}, nil)
 	return err
+}
+
+func (n *NodeController) Sync(objs []*kapi.Node) {
+	//just needed to implement the interface
 }
 
 func (n *NodeController) startNodeWatch(wf *factory.WatchFactory) error {
@@ -357,10 +363,11 @@ func (n *NodeController) hybridOverlayNodeUpdate(node *kapi.Node) error {
 	cookie := nameToCookie(node.Name)
 	drMACRaw := strings.Replace(drMAC.String(), ":", "", -1)
 
+	var flows []string
 	// Distributed Router MAC ARP responder flow; responds to ARP requests by OVN for
 	// any IP address within this node's assigned subnet and returns our hybrid overlay
 	// port's MAC address.
-	_, _, err = util.RunOVSOfctl("add-flow", extBridgeName,
+	flows = append(flows,
 		fmt.Sprintf("cookie=0x%s,table=0,priority=100,arp,in_port=ext,arp_tpa=%s,"+
 			"actions=move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],"+
 			"mod_dl_src:%s,"+
@@ -372,24 +379,21 @@ func (n *NodeController) hybridOverlayNodeUpdate(node *kapi.Node) error {
 			"move:NXM_NX_REG0[]->NXM_OF_ARP_SPA[],"+
 			"IN_PORT",
 			cookie, cidr.String(), drMAC.String(), drMACRaw))
-	if err != nil {
-		return fmt.Errorf("failed to add ARP responder flow for node %q: %v", node.Name, err)
-	}
-
 	// Send all flows for the remote node's assigned subnet to that node via the VXLAN tunnel.
 	// Windows hybrid overlay implementation requires that we set the destination MAC address
 	// to the node's Distributed Router MAC.
-	_, _, err = util.RunOVSOfctl("add-flow", extBridgeName,
+	flows = append(flows,
 		fmt.Sprintf("cookie=0x%s,table=0,priority=100,ip,nw_dst=%s,"+
 			"actions=load:%d->NXM_NX_TUN_ID[0..31],"+
 			"set_field:%s->tun_dst,"+
 			"set_field:%s->eth_dst,"+
 			"output:"+extVXLANName,
 			cookie, cidr.String(), hotypes.HybridOverlayVNI, nodeIP.String(), drMAC.String()))
-	if err != nil {
-		return fmt.Errorf("failed to add VXLAN flow for node %q: %v", node.Name, err)
-	}
 
+	n.flowMutex.Lock()
+	n.flowCache[cookie] = &flowCacheEntry{flows: flows}
+	n.flowMutex.Unlock()
+	n.flowChan <- true
 	return nil
 }
 
@@ -417,12 +421,10 @@ func (n *NodeController) Update(oldNode, newNode *kapi.Node) {
 	}
 }
 
-func deleteFlowsByCookie(cookie string) error {
-	_, stderr, err := util.RunOVSOfctl("del-flows", extBridgeName, fmt.Sprintf("cookie=0x%s/0xffffffff", cookie))
-	if err != nil {
-		return fmt.Errorf("failed to delete flows for cookie %q: %v, stderr: %v", cookie, err, stderr)
-	}
-	return nil
+func (n *NodeController) deleteFlowsByCookie(cookie string) {
+	n.flowMutex.Lock()
+	defer n.flowMutex.Unlock()
+	delete(n.flowCache, cookie)
 }
 
 // Delete handles node deletions
@@ -431,59 +433,7 @@ func (n *NodeController) Delete(node *kapi.Node) {
 		return
 	}
 
-	if err := deleteFlowsByCookie(nameToCookie(node.Name)); err != nil {
-		klog.Errorf(err.Error())
-	}
-}
-
-// Sync handles local node initialization and removing stale nodes on startup
-func (n *NodeController) Sync(nodes []*kapi.Node) {
-	hybridOverlayNodes := make(map[string]bool)
-	for _, node := range nodes {
-		if houtil.IsHybridOverlayNode(node) {
-			hybridOverlayNodes[nameToCookie(node.Name)] = true
-		}
-	}
-
-	stdout, stderr, err := util.RunOVSOfctl("dump-flows", extBridgeName, "table=0")
-	if err != nil {
-		klog.Errorf("failed to dump flows for %s: stderr: %q, error: %v", extBridgeName, stderr, err)
-		return
-	}
-
-	// Find all flows that exist in br-ext that are for nodes not present
-	// in the Kube node list
-	lines := strings.Split(stdout, "\n")
-	nodesToRemove := make(map[string]bool)
-	for _, line := range lines {
-		// Ignore the end-of-table drop rule
-		if strings.Contains(line, "actions=drop") {
-			continue
-		}
-
-		parts := strings.Split(line, ",")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			const cookieTag string = "cookie=0x"
-			if !strings.HasPrefix(part, cookieTag) {
-				continue
-			}
-			cookie := part[len(cookieTag):]
-			if len(cookie) != 8 {
-				// Ignore non-node-specific rules (eg cookie=0x0)
-				continue
-			}
-			if _, ok := hybridOverlayNodes[cookie]; !ok {
-				nodesToRemove[cookie] = true
-			}
-		}
-	}
-
-	for cookie := range nodesToRemove {
-		if err := deleteFlowsByCookie(cookie); err != nil {
-			klog.Errorf("Failed clean stale hybrid overlay node flow %q: %v", cookie, err)
-		}
-	}
+	n.deleteFlowsByCookie(nameToCookie(node.Name))
 }
 
 func getLocalNodeSubnet(nodeName string) (*net.IPNet, error) {
@@ -595,20 +545,24 @@ func (n *NodeController) ensureHybridOverlayBridge(node *kapi.Node) error {
 			", stderr:%s (%v)", stderr, err)
 	}
 
-	// Add default drop rule to table 0 and 1 for easier debugging via packet counters
-	for _, table := range []int{0, 1} {
-		_, stderr, err = util.RunOVSOfctl("add-flow", extBridgeName,
-			fmt.Sprintf("table=%d,priority=0,actions=drop", table))
-		if err != nil {
-			return fmt.Errorf("failed to set up hybrid overlay bridge default drop rule,"+
-				"stderr: %q, error: %v", stderr, err)
-		}
+	// Add the VXLAN port for sending/receiving traffic from hybrid overlay nodes
+	_, stderr, err = util.RunOVSVsctl("--may-exist", "add-port", extBridgeName, extVXLANName,
+		"--", "set", "interface", extVXLANName, "type=vxlan", `options:remote_ip="flow"`, `options:key="flow"`)
+	if err != nil {
+		return fmt.Errorf("failed to add VXLAN port for ovs bridge %s"+
+			", stderr:%s: %v", extBridgeName, stderr, err)
+	}
+
+	flows := make([]string, 0, 10)
+	// Add default drop rule to tables for easier debugging via packet counters
+	for _, table := range []int{0, 1, 20} {
+		flows = append(flows, fmt.Sprintf("table=%d,priority=0,actions=drop", table))
 	}
 	// Handle ARP for gateway address internally towards pods
 	// resubmit to table 1 for gateway mode arp processing
 	portMACRaw := strings.Replace(n.drMAC.String(), ":", "", -1)
 	portIPRaw := getIPAsHexString(n.drIP)
-	_, stderr, err = util.RunOVSOfctl("add-flow", extBridgeName,
+	flows = append(flows,
 		fmt.Sprintf("table=0,priority=100,in_port=%s,arp_op=1,arp,arp_tpa=%s,"+
 			"actions=move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],"+
 			"mod_dl_src:%s,"+
@@ -619,30 +573,14 @@ func (n *NodeController) ensureHybridOverlayBridge(node *kapi.Node) error {
 			"load:0x%s->NXM_OF_ARP_SPA[],"+
 			"IN_PORT,resubmit(,1)",
 			rampExt, n.drIP.String(), n.drMAC.String(), portMACRaw, portIPRaw))
-	if err != nil {
-		return fmt.Errorf("failed to set up hybrid overlay bridge ARP flow,"+
-			"stderr: %q, error: %v", stderr, err)
-	}
-
-	// Add the VXLAN port for sending/receiving traffic from hybrid overlay nodes
-	_, stderr, err = util.RunOVSVsctl("--may-exist", "add-port", extBridgeName, extVXLANName,
-		"--", "set", "interface", extVXLANName, "type=vxlan", `options:remote_ip="flow"`, `options:key="flow"`)
-	if err != nil {
-		return fmt.Errorf("failed to add VXLAN port for ovs bridge %s"+
-			", stderr:%s: %v", extBridgeName, stderr, err)
-	}
 
 	// Send incoming VXLAN traffic to the pod dispatch table
-	_, stderr, err = util.RunOVSOfctl("add-flow", extBridgeName,
+	flows = append(flows,
 		fmt.Sprintf("table=0,priority=100,in_port="+extVXLANName+",ip,nw_dst=%s,dl_dst=%s,actions=goto_table:10",
 			subnet.String(), n.drMAC.String()))
-	if err != nil {
-		return fmt.Errorf("failed to set up hybrid overlay bridge ARP flow,"+
-			"stderr: %q, error: %v", stderr, err)
-	}
 
 	// Handle ARP requests for hybrid external gateway
-	_, _, err = util.RunOVSOfctl("add-flow", extBridgeName,
+	flows = append(flows,
 		fmt.Sprintf("table=0,priority=100,arp,in_port=%s,arp_op=1,arp_tpa=%s,"+
 			"actions=move:tun_src->tun_dst,"+
 			"load:%d->NXM_NX_TUN_ID[0..31],"+
@@ -656,18 +594,59 @@ func (n *NodeController) ensureHybridOverlayBridge(node *kapi.Node) error {
 			"move:NXM_NX_REG0[]->NXM_OF_ARP_SPA[],"+
 			"IN_PORT",
 			extVXLANName, subnet.String(), hotypes.HybridOverlayVNI, n.drMAC.String(), portMACRaw))
-	if err != nil {
-		return fmt.Errorf("failed to add ARP responder flow for hybrid external gw on node %q: %v", n.nodeName, err)
-	}
 
 	// Default drop rule for incoming VXLAN traffic that matches no running pod
-	_, stderr, err = util.RunOVSOfctl("add-flow", extBridgeName, "table=10,priority=0,actions=drop")
-	if err != nil {
-		return fmt.Errorf("failed to set up hybrid overlay bridge pod dispatch default drop rule,"+
-			"stderr: %q, error: %v", stderr, err)
-	}
-
+	flows = append(flows, "table=10,priority=0,actions=drop")
+	n.flowMutex.Lock()
+	n.flowCache["0x0"] = &flowCacheEntry{flows: flows}
+	n.flowMutex.Unlock()
+	n.flowChan <- true
 	n.initialized = true
 	klog.Infof("hybrid overlay setup complete for node %s", node.Name)
 	return nil
+}
+
+func (n *NodeController) syncFlows() {
+	n.flowMutex.Lock()
+	defer n.flowMutex.Unlock()
+	// any learned flows in table 20 we need to store for the update, as long as they correspond to a
+	// current pod in the cache
+	stdout, stderr, err := util.RunOVSOfctl("dump-flows", "--no-stats", extBridgeName, "table=20")
+	if err != nil {
+		klog.Errorf("failed to dump flows for flow sync, stderr: %q, error: %v", stderr, err)
+		return
+	}
+	lines := strings.Split(stdout, "\n")
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		// Ignore the end-of-table drop rule
+		if strings.Contains(line, "actions=drop") {
+			continue
+		}
+		line = strings.TrimSpace(line)
+		cookie := strings.TrimPrefix(strings.Split(line, ",")[0], "cookie=0x")
+		if cacheEntry, ok := n.flowCache[cookie]; ok {
+			// we only ever have one learned flow per pod, so if we already cached it, we dont need to do it again
+			if cacheEntry.learned {
+				klog.V(5).Infof("Ignoring flow to add to hybrid cache as it is already learned: %s", line)
+				continue
+			}
+			klog.Infof("Learned flow added to hybrid flow cache: %s", line)
+			cacheEntry.flows = append(cacheEntry.flows, line)
+			cacheEntry.learned = true
+		} else {
+			klog.Warningf("Learned flow found with no matching cache entry: %s", line)
+		}
+	}
+
+	flows := make([]string, 0, 100)
+	for _, entry := range n.flowCache {
+		flows = append(flows, entry.flows...)
+	}
+	_, _, err = util.ReplaceOFFlows(extBridgeName, flows)
+	if err != nil {
+		klog.Errorf("failed to add flows, error: %v, flows: %s", err, flows)
+	}
 }
