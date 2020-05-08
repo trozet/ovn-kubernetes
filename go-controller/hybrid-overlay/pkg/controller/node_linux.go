@@ -243,7 +243,7 @@ func (n *NodeController) deletePod(pod *kapi.Pod) error {
 				}
 			}
 			if !tunStillActive {
-				n.deleteFlowsByCookie(nameToCookie(tunIP))
+				n.deleteFlowsByCookie(podIPToCookie(net.ParseIP(tunIP)))
 			}
 		}
 		n.tunMapMutex.Unlock()
