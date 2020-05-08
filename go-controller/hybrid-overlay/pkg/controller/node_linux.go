@@ -73,8 +73,13 @@ func NewNode(kube kube.Interface, nodeName string, stopChan <-chan struct{}) (*N
 	return node, nil
 }
 
-func podToCookie(pod *kapi.Pod) string {
-	return nameToCookie(pod.Namespace + "_" + pod.Name)
+func podIPToCookie(podIP net.IP) string {
+	//TODO add ipv6 support
+	ip4 := podIP.To4()
+	if ip4 == nil {
+		return ""
+	}
+	return fmt.Sprintf("%02x%02x%02x%02x", ip4[0], ip4[1], ip4[2], ip4[3])
 }
 
 func (n *NodeController) waitForNamespace(name string) (*kapi.Namespace, error) {
@@ -111,7 +116,6 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 	}
 	namespaceExternalGw := namespace.GetAnnotations()[hotypes.HybridOverlayExternalGw]
 	namespaceVTEP := namespace.GetAnnotations()[hotypes.HybridOverlayVTEP]
-	cookie := podToCookie(pod)
 	if !n.initialized {
 		node, err := n.wf.GetNode(n.nodeName)
 		if err != nil {
@@ -127,6 +131,7 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 	}
 	var flows []string
 	for _, podIP := range podIPs {
+		cookie := podIPToCookie(podIP.IP)
 		// table 10 is pod dispatch - Incoming vxlan traffic towards pods
 		flows = append(flows, fmt.Sprintf(
 			"table=10,cookie=0x%s,priority=100,ip,nw_dst=%s,"+
@@ -160,7 +165,7 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 					"load:%d->NXM_NX_TUN_ID[0..31],"+
 					"load:0x%s->NXM_NX_TUN_IPV4_DST[],"+
 					"output:NXM_OF_IN_PORT[])",
-					cookie, pod, portMACRaw, hotypes.HybridOverlayVNI, vtepIPRaw)
+					podIPToCookie(net.ParseIP(pod)), pod, portMACRaw, hotypes.HybridOverlayVNI, vtepIPRaw)
 			}
 		}
 
@@ -168,7 +173,7 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 		// special cookie needed here for tunnel
 		// tunnel cookie flows only contain a single flow ever, but it is updated by multiple pod adds
 		// so need proper locking around tunMap
-		tunCookie := nameToCookie(namespaceVTEP)
+		tunCookie := podIPToCookie(net.ParseIP(namespaceVTEP))
 		n.flowMutex.Lock()
 		n.flowCache[tunCookie] = &flowCacheEntry{flows: []string{
 			fmt.Sprintf("table=0,cookie=0x%s,priority=120,in_port=%s,arp,arp_spa=%s,tun_src=%s,"+
@@ -202,16 +207,14 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 				"output:%s",
 				cookie, podIP.IP, n.drMAC.String(), n.drMAC.String(), n.drIP, namespaceExternalGw, hotypes.HybridOverlayVNI,
 				namespaceVTEP, extVXLANName))
+		n.flowMutex.Lock()
+		n.flowCache[cookie] = &flowCacheEntry{flows: flows}
+		if ignoreLearn {
+			n.flowCache[cookie].ignoreLearn = true
+		}
+		n.flowMutex.Unlock()
 	}
-
-	n.flowMutex.Lock()
-	n.flowCache[cookie] = &flowCacheEntry{flows: flows}
-	if ignoreLearn {
-		n.flowCache[cookie].ignoreLearn = true
-	}
-	n.flowMutex.Unlock()
 	n.flowChan <- true
-
 	klog.Infof("Pod %s wired for Hybrid Overlay", pod.Name)
 	return nil
 }
@@ -244,7 +247,9 @@ func (n *NodeController) deletePod(pod *kapi.Pod) error {
 			}
 		}
 		n.tunMapMutex.Unlock()
-		n.deleteFlowsByCookie(podToCookie(pod))
+		for _, podIP := range podIPs {
+			n.deleteFlowsByCookie(podIPToCookie(podIP.IP))
+		}
 	}
 	return nil
 }
