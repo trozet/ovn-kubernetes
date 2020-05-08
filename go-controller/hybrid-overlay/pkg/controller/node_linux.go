@@ -29,8 +29,8 @@ const (
 
 type flowCacheEntry struct {
 	flows []string
-	// true if table 20 flow has been learned from the switch
-	learned bool
+	// special table 20 flow if it has been learned from the switch
+	learnedFlow string
 	// ignore learn on next flow sync for this entry
 	ignoreLearn bool
 }
@@ -681,22 +681,20 @@ func (n *NodeController) syncFlows() {
 		line = strings.TrimSpace(line)
 		cookie := strings.TrimPrefix(strings.Split(line, ",")[0], "cookie=0x")
 		if cacheEntry, ok := n.flowCache[cookie]; ok {
-			// we only ever have one learned flow per pod, so if we already cached it, we dont need to do it again
-			if cacheEntry.learned {
-				klog.V(5).Infof("Ignoring flow to add to hybrid cache as it is already learned: %s", line)
-				continue
-			}
 			// we ignore certain cookies for learning to avoid a case where a NS was updated with a new vtep
 			// and we accidentally pick up the old vtep flow and cache it. This should only ever happen on a pod update
 			// with an NS annotation VTEP change. We only need to ignore it for one iteration of sync.
 			if cacheEntry.ignoreLearn {
 				klog.V(5).Infof("Ignoring learned flow to add to hybrid cache for this iteration: %s", line)
 				cacheEntry.ignoreLearn = false
+				cacheEntry.learnedFlow = ""
 				continue
 			}
-			klog.Infof("Learned flow added to hybrid flow cache: %s", line)
-			cacheEntry.flows = append(cacheEntry.flows, line)
-			cacheEntry.learned = true
+			// we only ever have one learned flow per pod IP
+			if cacheEntry.learnedFlow != line {
+				cacheEntry.learnedFlow = line
+				klog.Infof("Learned flow added to hybrid flow cache: %s", line)
+			}
 		} else {
 			klog.Warningf("Learned flow found with no matching cache entry: %s", line)
 		}
@@ -705,6 +703,9 @@ func (n *NodeController) syncFlows() {
 	flows := make([]string, 0, 100)
 	for _, entry := range n.flowCache {
 		flows = append(flows, entry.flows...)
+		if len(entry.learnedFlow) > 0 {
+			flows = append(flows, entry.learnedFlow)
+		}
 	}
 	_, _, err = util.ReplaceOFFlows(extBridgeName, flows)
 	if err != nil {
