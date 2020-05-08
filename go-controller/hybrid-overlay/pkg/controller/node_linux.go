@@ -158,7 +158,7 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 					learnActions += ","
 				}
 				learnActions += fmt.Sprintf("learn("+
-					"table=20,cookie=0x%s,priority=50,idle_timeout=60,"+
+					"table=20,cookie=0x%s,priority=50,"+
 					"dl_type=0x0800,nw_src=%s,"+
 					"load:NXM_NX_ARP_SHA[]->NXM_OF_ETH_DST[],"+
 					"load:0x%s->NXM_OF_ETH_SRC[],"+
@@ -180,7 +180,7 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 		n.flowCache[tunCookie] = &flowCacheEntry{flows: []string{
 			fmt.Sprintf("table=0,cookie=0x%s,priority=120,in_port=%s,arp,arp_spa=%s,tun_src=%s,"+
 				"actions=%s,resubmit(,2)",
-				cookie, extVXLANName, namespaceExternalGw, namespaceVTEP, learnActions)}}
+				tunCookie, extVXLANName, namespaceExternalGw, namespaceVTEP, learnActions)}}
 		n.flowMutex.Unlock()
 		n.tunMapMutex.Unlock()
 
