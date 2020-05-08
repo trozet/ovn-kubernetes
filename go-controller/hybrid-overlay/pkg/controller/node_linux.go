@@ -680,6 +680,11 @@ func (n *NodeController) syncFlows() {
 		}
 		line = strings.TrimSpace(line)
 		cookie := strings.TrimPrefix(strings.Split(line, ",")[0], "cookie=0x")
+		// the cookie from OVS will remove leading zeros, and we know the cookie length for learned flow (IP to hex)
+		// is always 8, so pack with extra 0s
+		for len(cookie) < 8 {
+			cookie = "0" + cookie
+		}
 		if cacheEntry, ok := n.flowCache[cookie]; ok {
 			// we ignore certain cookies for learning to avoid a case where a NS was updated with a new vtep
 			// and we accidentally pick up the old vtep flow and cache it. This should only ever happen on a pod update
