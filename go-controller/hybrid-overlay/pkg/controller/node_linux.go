@@ -169,15 +169,17 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 			}
 		}
 
-		// for arp response from vxlan, learn and add flow to table 20, for pod-> vxlan traffic
+		// for arp request/response from vxlan, learn and add flow to table 20, for pod-> vxlan traffic
 		// special cookie needed here for tunnel
 		// tunnel cookie flows only contain a single flow ever, but it is updated by multiple pod adds
 		// so need proper locking around tunMap
+		// after learning actions, we need to resubmit the flow to the gw arp response table (2) so that we can respond
+		// back if this was an arp request
 		tunCookie := podIPToCookie(net.ParseIP(namespaceVTEP))
 		n.flowMutex.Lock()
 		n.flowCache[tunCookie] = &flowCacheEntry{flows: []string{
 			fmt.Sprintf("table=0,cookie=0x%s,priority=120,in_port=%s,arp,arp_spa=%s,tun_src=%s,"+
-				"actions=%s",
+				"actions=%s,resubmit(,2)",
 				cookie, extVXLANName, namespaceExternalGw, namespaceVTEP, learnActions)}}
 		n.flowMutex.Unlock()
 		n.tunMapMutex.Unlock()
@@ -632,9 +634,19 @@ func (n *NodeController) ensureHybridOverlayBridge(node *kapi.Node) error {
 		fmt.Sprintf("table=0,priority=100,in_port="+extVXLANName+",ip,nw_dst=%s,dl_dst=%s,actions=goto_table:10",
 			subnet.String(), n.drMAC.String()))
 
-	// Handle ARP requests for hybrid external gateway
+	// Handle ARP requests from hybrid external gateway
+	// First flow is low priority flow to get to table 2 (arp response table)
+	// exgw will have flows that match for arp to build learn table 20, they need to be hit and then punt
+	// to table 2
+	// Therefore install a default low priority flow in case those flows are not installed via pod update
 	flows = append(flows,
-		fmt.Sprintf("table=0,priority=100,arp,in_port=%s,arp_op=1,arp_tpa=%s,"+
+		fmt.Sprintf("table=0,priority=10,arp,in_port=%s,arp_op=1,arp_tpa=%s,"+
+			"actions=resubmit(,2)",
+			extVXLANName, subnet.String()))
+
+	// Install flow to handle the arp response from exgws
+	flows = append(flows,
+		fmt.Sprintf("table=2,priority=100,arp,in_port=%s,arp_op=1,arp_tpa=%s,"+
 			"actions=move:tun_src->tun_dst,"+
 			"load:%d->NXM_NX_TUN_ID[0..31],"+
 			"move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],"+
