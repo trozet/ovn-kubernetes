@@ -39,6 +39,14 @@ type flowCacheEntry struct {
 	ignoreLearn bool
 }
 
+type namespaceEntry struct {
+	name   string
+	vtep   string
+	gw     string
+	podIPs map[string]struct{}
+	cookie string
+}
+
 // NodeController is the node hybrid overlay controller
 type NodeController struct {
 	kube        kube.Interface
@@ -47,9 +55,9 @@ type NodeController struct {
 	initialized bool
 	drMAC       net.HardwareAddr
 	drIP        net.IP
-	// contains a map of pods to corresponding tunnels
-	tunMap      map[string]string
-	tunMapMutex sync.Mutex
+	// contains a map of ns to corresponding tunnel, gw, pods
+	nsMap      map[string]*namespaceEntry
+	nsMapMutex sync.Mutex
 	// flow cache map of cookies to flows
 	flowCache map[string]*flowCacheEntry
 	flowMutex sync.Mutex
@@ -65,14 +73,14 @@ type NodeController struct {
 //  2. Setting back annotations about its VTEP and gateway MAC address to its own object
 func NewNode(kube kube.Interface, nodeName string, stopChan <-chan struct{}) (*NodeController, error) {
 	node := &NodeController{
-		kube:        kube,
-		nodeName:    nodeName,
-		tunMap:      make(map[string]string),
-		tunMapMutex: sync.Mutex{},
-		flowCache:   make(map[string]*flowCacheEntry),
-		flowMutex:   sync.Mutex{},
-		flowChan:    make(chan struct{}, 1),
-		stopChan:    stopChan,
+		kube:       kube,
+		nodeName:   nodeName,
+		nsMap:      make(map[string]*namespaceEntry),
+		nsMapMutex: sync.Mutex{},
+		flowCache:  make(map[string]*flowCacheEntry),
+		flowMutex:  sync.Mutex{},
+		flowChan:   make(chan struct{}, 1),
+		stopChan:   stopChan,
 	}
 	return node, nil
 }
@@ -113,13 +121,30 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 		klog.V(5).Infof("cleaning up hybrid overlay pod %s/%s because %v", pod.Namespace, pod.Name, err)
 		return n.deletePod(pod)
 	}
+	// find namespace
+	n.nsMapMutex.Lock()
+	nsEntry, ok := n.nsMap[pod.Namespace]
+	if !ok {
+		namespace, err := n.waitForNamespace(pod.Namespace)
+		if err != nil {
+			return err
+		}
 
-	namespace, err := n.waitForNamespace(pod.Namespace)
-	if err != nil {
-		return err
+		nsCookie := podIPToCookie(net.ParseIP(namespace.Annotations[hotypes.HybridOverlayExternalGw])) +
+			podIPToCookie(net.ParseIP(namespace.Annotations[hotypes.HybridOverlayVTEP]))
+		nsEntry = &namespaceEntry{
+			name: pod.Namespace,
+			gw: namespace.Annotations[hotypes.HybridOverlayExternalGw],
+			vtep: namespace.Annotations[hotypes.HybridOverlayVTEP],
+			cookie: nsCookie,
+			podIPs: make(map[string]struct{}),
+		}
+		n.nsMap[pod.Namespace] = nsEntry
 	}
-	namespaceExternalGw := namespace.GetAnnotations()[hotypes.HybridOverlayExternalGw]
-	namespaceVTEP := namespace.GetAnnotations()[hotypes.HybridOverlayVTEP]
+	namespaceExternalGw := nsEntry.gw
+	namespaceVTEP := nsEntry.vtep
+	n.nsMapMutex.Unlock()
+
 	if !n.initialized {
 		node, err := n.wf.GetNode(n.nodeName)
 		if err != nil {
@@ -153,43 +178,10 @@ func (n *NodeController) addOrUpdatePod(pod *kapi.Pod, ignoreLearn bool) error {
 			continue
 		}
 
-		portMACRaw := strings.Replace(n.drMAC.String(), ":", "", -1)
-		vtepIPRaw := getIPAsHexString(net.ParseIP(namespaceVTEP))
-
-		// update map for tun to pod
-		n.tunMapMutex.Lock()
-		n.tunMap[podIP.IP.String()] = namespaceVTEP
-		// iterate and find all pods that belong to this VTEP and create learn actions
-		learnActions := ""
-		for pod, tun := range n.tunMap {
-			if tun == namespaceVTEP {
-				if len(learnActions) > 0 {
-					learnActions += ","
-				}
-				learnActions += fmt.Sprintf("learn("+
-					"table=20,cookie=0x%s,priority=50,"+
-					"dl_type=0x0800,nw_src=%s,"+
-					"load:NXM_NX_ARP_SHA[]->NXM_OF_ETH_DST[],"+
-					"load:0x%s->NXM_OF_ETH_SRC[],"+
-					"load:%d->NXM_NX_TUN_ID[0..31],"+
-					"load:0x%s->NXM_NX_TUN_IPV4_DST[],"+
-					"output:NXM_OF_IN_PORT[])",
-					podIPToCookie(net.ParseIP(pod)), pod, portMACRaw, hotypes.HybridOverlayVNI, vtepIPRaw)
-			}
-		}
-
-		// for arp request/response from vxlan, learn and add flow to table 20, for pod-> vxlan traffic
-		// special cookie needed here for tunnel
-		// tunnel cookie flows only contain a single flow ever, but it is updated by multiple pod adds
-		// so need proper locking around tunMap
-		// after learning actions, we need to resubmit the flow to the gw arp response table (2) so that we can respond
-		// back if this was an arp request
-		tunCookie := podIPToCookie(net.ParseIP(namespaceVTEP))
-		tunFlow := fmt.Sprintf("table=0,cookie=0x%s,priority=120,in_port=%s,arp,arp_spa=%s,tun_src=%s,"+
-			"actions=%s,resubmit(,2)",
-			tunCookie, extVXLANName, namespaceExternalGw, namespaceVTEP, learnActions)
-		n.updateFlowCacheEntry(tunCookie, []string{tunFlow}, false)
-		n.tunMapMutex.Unlock()
+		n.nsMapMutex.Lock()
+		nsEntry.podIPs[podIP.IP.String()] = struct{}{}
+		n.updateNamespaceFlow(nsEntry)
+		n.nsMapMutex.Unlock()
 
 		// add flow to table 0 to match on incoming traffic from pods, send to table 20
 		// bypass regular Hybrid overlay for gateway mode
@@ -229,33 +221,20 @@ func (n *NodeController) deletePod(pod *kapi.Pod) error {
 		if err != nil {
 			return fmt.Errorf("error getting pod details: %v", err)
 		}
-		tunIPs := make(map[string]struct{})
-		n.tunMapMutex.Lock()
-		for _, podIP := range podIPs {
-			// need to check if any pods in the tunMap still correspond to a tunnel
-			// store the tunIP so we can delete cookie later
-			tunIPs[n.tunMap[podIP.IP.String()]] = struct{}{}
-			delete(n.tunMap, podIP.IP.String())
-		}
-		for tunIP := range tunIPs {
-			if len(tunIP) > 0 {
-				// check if any pods still belong to this tunnel so we can clean up the flow if not
-				tunStillActive := false
-				for _, tun := range n.tunMap {
-					if tunIP == tun {
-						tunStillActive = true
-						break
-					}
-				}
-				if !tunStillActive {
-					cookie := podIPToCookie(net.ParseIP(tunIP))
-					if cookie != "" {
-						n.deleteFlowsByCookie(cookie)
-					}
-				}
+		n.nsMapMutex.Lock()
+		nsEntry, ok := n.nsMap[pod.Namespace]
+		if ok {
+			for _, podIP := range podIPs {
+				delete(nsEntry.podIPs, podIP.String())
+			}
+			if len(nsEntry.podIPs) == 0 {
+				// no pods left in this namespace, delete the flow
+				n.deleteFlowsByCookie(nsEntry.cookie)
+			} else {
+				n.updateNamespaceFlow(nsEntry)
 			}
 		}
-		n.tunMapMutex.Unlock()
+		n.nsMapMutex.Unlock()
 		for _, podIP := range podIPs {
 			cookie := podIPToCookie(podIP.IP)
 			if cookie == "" {
@@ -368,6 +347,17 @@ func (n *NodeController) startNamespaceWatch(wf *factory.WatchFactory) error {
 	n.wf = wf
 	_, err := wf.AddNamespaceHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
+			namespace := obj.(*kapi.Namespace)
+			nsCookie := podIPToCookie(net.ParseIP(namespace.Annotations[hotypes.HybridOverlayExternalGw])) +
+				podIPToCookie(net.ParseIP(namespace.Annotations[hotypes.HybridOverlayVTEP]))
+			nsEntry := &namespaceEntry{
+				name: namespace.Name,
+				gw: namespace.Annotations[hotypes.HybridOverlayExternalGw],
+				vtep: namespace.Annotations[hotypes.HybridOverlayVTEP],
+				cookie: nsCookie,
+				podIPs: make(map[string]struct{}),
+			}
+			n.nsMap[namespace.Name] = nsEntry
 			// dont care about namespace addition, we already wait for the annotation
 		},
 		UpdateFunc: func(old, newer interface{}) {
@@ -375,6 +365,13 @@ func (n *NodeController) startNamespaceWatch(wf *factory.WatchFactory) error {
 			nsOld := old.(*kapi.Namespace)
 
 			if nsHybridAnnotationChanged(nsOld, nsNew) {
+				nsEntry := n.nsMap[nsNew.Name]
+				nsEntry.gw = nsNew.GetAnnotations()[hotypes.HybridOverlayExternalGw]
+				nsEntry.vtep = nsNew.GetAnnotations()[hotypes.HybridOverlayVTEP]
+				// delete old ns cookie entry and it will be rebuilt
+				delete(n.flowCache, nsEntry.cookie)
+				// update ns cookie
+				nsEntry.cookie = podIPToCookie(net.ParseIP(nsEntry.vtep)) + podIPToCookie(net.ParseIP(nsEntry.gw))
 				pods, err := wf.GetPods(nsNew.Namespace)
 				if err != nil {
 					klog.Errorf("failed to get pods for NS update in hybrid overlay: %v", err)
@@ -390,7 +387,7 @@ func (n *NodeController) startNamespaceWatch(wf *factory.WatchFactory) error {
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
-			// dont care about namespace delete, pod flows will be deleted upon pod deletion
+			delete(n.nsMap, obj.(*kapi.Namespace).Namespace)
 		},
 	}, nil)
 	return err
@@ -776,4 +773,37 @@ func (n *NodeController) updateFlowCacheEntry(cookie string, flows []string, ign
 	defer n.flowMutex.Unlock()
 	n.flowCache[cookie] = &flowCacheEntry{flows: flows}
 	n.flowCache[cookie].ignoreLearn = ignoreLearn
+}
+
+// updateNamespaceFlow requires holding the proper nsMapMutex
+func (n *NodeController) updateNamespaceFlow(entry *namespaceEntry) {
+	portMACRaw := strings.Replace(n.drMAC.String(), ":", "", -1)
+	vtepIPRaw := getIPAsHexString(net.ParseIP(entry.vtep))
+	// iterate and find all pods that belong to this VTEP and create learn actions
+	learnActions := ""
+	for podIP, _ := range entry.podIPs {
+		if len(learnActions) > 0 {
+			learnActions += ","
+		}
+		learnActions += fmt.Sprintf("learn("+
+			"table=20,cookie=0x%s,priority=50,"+
+			"dl_type=0x0800,nw_src=%s,"+
+			"load:NXM_NX_ARP_SHA[]->NXM_OF_ETH_DST[],"+
+			"load:0x%s->NXM_OF_ETH_SRC[],"+
+			"load:%d->NXM_NX_TUN_ID[0..31],"+
+			"load:0x%s->NXM_NX_TUN_IPV4_DST[],"+
+			"output:NXM_OF_IN_PORT[])",
+			podIPToCookie(net.ParseIP(podIP)), podIP, portMACRaw, hotypes.HybridOverlayVNI, vtepIPRaw)
+	}
+
+	// for arp request/response from vxlan, learn and add flow to table 20, for pod-> vxlan traffic
+	// special cookie needed here for tunnel
+	// tunnel cookie flows only contain a single flow ever, but it is updated by multiple pod adds
+	// so need proper locking around tunMap
+	// after learning actions, we need to resubmit the flow to the gw arp response table (2) so that we can respond
+	// back if this was an arp request
+	nsFlow := fmt.Sprintf("table=0,cookie=0x%s,priority=120,in_port=%s,arp,arp_spa=%s,tun_src=%s,"+
+		"actions=%s,resubmit(,2)",
+		entry.cookie, extVXLANName, entry.gw, entry.vtep, learnActions)
+	n.updateFlowCacheEntry(entry.cookie, []string{nsFlow}, false)
 }
