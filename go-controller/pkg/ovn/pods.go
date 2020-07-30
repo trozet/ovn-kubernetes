@@ -1,6 +1,7 @@
 package ovn
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
@@ -144,6 +145,42 @@ func (oc *Controller) deleteLogicalPort(pod *kapi.Pod) {
 		nsInfo.Unlock()
 	}
 
+	routingNamespaceAnnotation := pod.Annotations["k8s.ovn.org/routing-namespace"]
+	if routingNamespaceAnnotation != "" {
+		existingPods, err := oc.watchFactory.GetPods(routingNamespaceAnnotation)
+		if err != nil {
+			klog.Errorf("Failed to get all the pods (%v)", err)
+		}
+		for _, existingPod := range existingPods {
+			for _, podIP := range existingPod.Status.PodIPs {
+				var mask string
+				if utilnet.IsIPv6(net.ParseIP(podIP.IP)) {
+					mask = "/128"
+				} else {
+					mask = "/32"
+				}
+				for _, gwIP := range pod.Status.PodIPs {
+					_, stderr, err = util.RunOVNNbctl("--", "--if-exists", "--policy=src-ip",
+						"lr-route-del", "GR_"+existingPod.Spec.NodeName, podIP.IP+mask, gwIP.IP)
+					if err != nil {
+						klog.Errorf("Unable to delete pod router route to GR router, stderr:%q, err:%v", stderr, err)
+					} else {
+						nsInfo, err := oc.waitForNamespaceLocked(pod.Namespace)
+						if err != nil {
+							klog.Errorf(err.Error())
+						}
+						defer nsInfo.Unlock()
+						for idx, item := range nsInfo.routingExternalGWs {
+							if item.Equal(net.ParseIP(gwIP.IP)) {
+								nsInfo.routingExternalGWs = append(nsInfo.routingExternalGWs[:idx], nsInfo.routingExternalGWs[idx+1:]...)
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	oc.logicalPortCache.remove(logicalPort)
 }
 
@@ -496,6 +533,54 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 				if err != nil {
 					return fmt.Errorf("failed to create SNAT rule for pod on gateway router %s, "+
 						"stdout: %q, stderr: %q, error: %v", gr, stdout, stderr, err)
+				}
+			}
+		}
+	}
+
+	type Network struct {
+		Name string
+		Ips  []string
+	}
+	routingNamespaceAnnotation := pod.Annotations["k8s.ovn.org/routing-namespace"]
+	if routingNamespaceAnnotation != "" {
+		routingNetworkAnnotation := pod.Annotations["k8s.ovn.org/routing-network"]
+		if routingNetworkAnnotation != "" {
+			var multusNetworks []Network
+			err := json.Unmarshal([]byte(pod.ObjectMeta.Annotations["k8s.v1.cni.cncf.io/network-status"]), &multusNetworks)
+			if err != nil {
+				return fmt.Errorf("unable to unmarshall annotation k8s.v1.cni.cncf.io/network-status on pod %s: %v", pod.Name, err)
+			}
+
+			existingPods, err := oc.watchFactory.GetPods(routingNamespaceAnnotation)
+			if err != nil {
+				return fmt.Errorf("Failed to get all the pods (%v)", err)
+			}
+			for _, multusNetwork := range multusNetworks {
+				if multusNetwork.Name == routingNetworkAnnotation {
+					var mask string
+					for _, gw := range multusNetwork.Ips {
+						for _, pod := range existingPods {
+							for _, podIP := range pod.Status.PodIPs {
+								if utilnet.IsIPv6(net.ParseIP(podIP.String())) {
+									mask = "/128"
+								} else {
+									mask = "/32"
+								}
+								_, stderr, err := util.RunOVNNbctl("--", "--may-exist", "--policy=src-ip", "--ecmp",
+									"lr-route-add", "GR_"+pod.Spec.NodeName, pod.Status.PodIP+mask, gw)
+								if err != nil {
+									return fmt.Errorf("unable to add CNF src-ip route to GR router, stderr:%q, err:%v", stderr, err)
+								} else {
+									nsInfo, err := oc.waitForNamespaceLocked(pod.Namespace)
+									if err != nil {
+										return err
+									}
+									nsInfo.routingExternalGWs = append(nsInfo.routingExternalGWs, net.ParseIP(gw))
+								}
+							}
+						}
+					}
 				}
 			}
 		}
