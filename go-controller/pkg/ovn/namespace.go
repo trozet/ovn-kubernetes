@@ -19,6 +19,8 @@ const (
 	// Annotation used to enable/disable multicast in the namespace
 	nsMulticastAnnotation        = "k8s.ovn.org/multicast-enabled"
 	routingExternalGWsAnnotation = "k8s.ovn.org/routing-external-gws"
+	routingNamespaceAnnotation   = "k8s.ovn.org/routing-namespaces"
+	routingNetworkAnnotation     = "k8s.ovn.org/routing-network"
 )
 
 func (oc *Controller) syncNamespaces(namespaces []interface{}) {
@@ -243,9 +245,9 @@ func (oc *Controller) updateNamespace(old, newer *kapi.Namespace) {
 			var mask string
 			for gw, gr := range gwToGr {
 				if utilnet.IsIPv6(net.ParseIP(podIP)) {
-					mask = "/128"
+					mask = IPv6FullMask
 				} else {
-					mask = "/32"
+					mask = IPv4FullMask
 				}
 				_, stderr, err = util.RunOVNNbctl("--", "--if-exists", "--policy=src-ip",
 					"lr-route-del", gr, podIP+mask, gw)
@@ -279,9 +281,9 @@ func (oc *Controller) updateNamespace(old, newer *kapi.Namespace) {
 							var mask string
 							for _, podIP := range pod.Status.PodIPs {
 								if utilnet.IsIPv6(net.ParseIP(podIP.IP)) {
-									mask = "/128"
+									mask = IPv6FullMask
 								} else {
-									mask = "/32"
+									mask = IPv4FullMask
 								}
 								_, stderr, err = util.RunOVNNbctl("--", "--may-exist", "--policy=src-ip", "--ecmp",
 									"lr-route-add", gr, podIP.IP+mask, gw.String())
@@ -389,9 +391,10 @@ func (oc *Controller) createNamespaceLocked(ns string) *namespaceInfo {
 	defer oc.namespacesMutex.Unlock()
 
 	nsInfo := &namespaceInfo{
-		networkPolicies:   make(map[string]*namespacePolicy),
-		podExternalRoutes: make(map[string]map[string]string),
-		multicastEnabled:  false,
+		networkPolicies:       make(map[string]*namespacePolicy),
+		podExternalRoutes:     make(map[string]map[string]string),
+		multicastEnabled:      false,
+		routingExternalPodGWs: make(map[string][]net.IP),
 	}
 	nsInfo.Lock()
 	oc.namespaces[ns] = nsInfo
