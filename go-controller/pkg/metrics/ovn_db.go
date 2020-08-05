@@ -385,21 +385,29 @@ func RegisterOvnDBMetrics(clientset *kubernetes.Clientset, k8sNodeName string) {
 		},
 		func() float64 { return 1 },
 	))
-	ovnRegistry.MustRegister(metricDBClusterCID)
-	ovnRegistry.MustRegister(metricDBClusterSID)
-	ovnRegistry.MustRegister(metricDBClusterServerStatus)
-	ovnRegistry.MustRegister(metricDBClusterTerm)
-	ovnRegistry.MustRegister(metricDBClusterServerRole)
-	ovnRegistry.MustRegister(metricDBClusterServerVote)
-	ovnRegistry.MustRegister(metricDBClusterElectionTimer)
-	ovnRegistry.MustRegister(metricDBClusterLogIndexStart)
-	ovnRegistry.MustRegister(metricDBClusterLogIndexNext)
-	ovnRegistry.MustRegister(metricDBClusterLogNotCommitted)
-	ovnRegistry.MustRegister(metricDBClusterLogNotApplied)
-	ovnRegistry.MustRegister(metricDBClusterConnIn)
-	ovnRegistry.MustRegister(metricDBClusterConnOut)
-	ovnRegistry.MustRegister(metricDBClusterConnInErr)
-	ovnRegistry.MustRegister(metricDBClusterConnOutErr)
+	// check if DB is clustered or not
+	dbIsClustered := true
+	_, _, err = util.RunOVSDBTool("db-is-standalone", "/etc/openvswitch/ovnsb_db.db")
+	if err == nil {
+		dbIsClustered = false
+	}
+	if dbIsClustered {
+		ovnRegistry.MustRegister(metricDBClusterCID)
+		ovnRegistry.MustRegister(metricDBClusterSID)
+		ovnRegistry.MustRegister(metricDBClusterServerStatus)
+		ovnRegistry.MustRegister(metricDBClusterTerm)
+		ovnRegistry.MustRegister(metricDBClusterServerRole)
+		ovnRegistry.MustRegister(metricDBClusterServerVote)
+		ovnRegistry.MustRegister(metricDBClusterElectionTimer)
+		ovnRegistry.MustRegister(metricDBClusterLogIndexStart)
+		ovnRegistry.MustRegister(metricDBClusterLogIndexNext)
+		ovnRegistry.MustRegister(metricDBClusterLogNotCommitted)
+		ovnRegistry.MustRegister(metricDBClusterLogNotApplied)
+		ovnRegistry.MustRegister(metricDBClusterConnIn)
+		ovnRegistry.MustRegister(metricDBClusterConnOut)
+		ovnRegistry.MustRegister(metricDBClusterConnInErr)
+		ovnRegistry.MustRegister(metricDBClusterConnOutErr)
+	}
 	ovnRegistry.MustRegister(metricDBE2eTimestamp)
 
 	// functions responsible for collecting the values and updating the prometheus metrics
@@ -410,7 +418,9 @@ func RegisterOvnDBMetrics(clientset *kubernetes.Clientset, k8sNodeName string) {
 		}
 		for {
 			for direction, database := range dirDbMap {
-				ovnDBClusterStatusMetricsUpdater(direction, database)
+				if dbIsClustered {
+					ovnDBClusterStatusMetricsUpdater(direction, database)
+				}
 				ovnDBMemoryMetricsUpdater(direction, database)
 				ovnDBSizeMetricsUpdater(direction, database)
 				ovnE2eTimeStampUpdater(direction, database)

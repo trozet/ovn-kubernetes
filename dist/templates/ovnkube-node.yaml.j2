@@ -193,6 +193,10 @@ spec:
         - mountPath: /ovn-cert
           name: host-ovn-cert
           readOnly: true
+        - mountPath: /etc/openvswitch/
+          name: host-var-lib-ovs
+        - mountPath: /etc/ovn/
+          name: host-var-lib-ovs
         {% if kind is defined and kind -%}
         - mountPath: /var/run/netns
           name: host-netns
@@ -344,6 +348,9 @@ spec:
       - name: host-config-openvswitch
         hostPath:
           path: /etc/origin/openvswitch
+      - name: host-var-lib-ovs
+        hostPath:
+          path: /var/lib/openvswitch
       {% if kind is defined and kind -%}
       - name: host-netns
         hostPath:
