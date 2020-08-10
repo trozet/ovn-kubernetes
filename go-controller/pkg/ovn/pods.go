@@ -11,6 +11,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/ipallocator"
 	util "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	kapi "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -301,7 +302,7 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 	var cmds []*goovn.OvnCommand
 	var addresses []string
 	var cmd *goovn.OvnCommand
-	var releaseIPs, clearAddressesFromNB bool
+	var releaseIPs, clearAddressesFromNB, clearAnnotation bool
 
 	// Check if the pod's logical switch port already exists. If it
 	// does don't re-add the port to OVN as this will change its
@@ -361,11 +362,22 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 					portName, logicalSwitch)
 			}
 		}
+		if clearAnnotation && err != nil {
+			if err = oc.kube.SetAnnotationsOnPod(pod, map[string]string{util.OvnPodAnnotationName: ""}); err != nil {
+				klog.Errorf("Failed to clear annotation on pod %s: %v", pod.Name, err)
+			}
+		}
 	}()
 
 	if err == nil {
 		podMac = annotation.MAC
 		podIfAddrs = annotation.IPs
+
+		// if we found an annotation and the MAC or IPs are missing, clear annotation
+		if len(podIfAddrs) == 0 || podMac == nil {
+			clearAnnotation = true
+			return fmt.Errorf("annotation present on %s with no IP addresses or MAC", pod.Name)
+		}
 
 		// If the pod already has annotations use the existing static
 		// IP/MAC from the annotation.
@@ -374,6 +386,14 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 			return fmt.Errorf("unable to create LSPSetDynamicAddresses command for port: %s", portName)
 		}
 		cmds = append(cmds, cmd)
+
+		// ensure we have/can allocate the IP in the annotation
+		if err = oc.lsManager.AllocateIPs(logicalSwitch, podIfAddrs); err != nil && err != ipallocator.ErrAllocated {
+			clearAnnotation = true
+			// this should also be treated as an allocation for purposes of error handling
+			releaseIPs = true
+			return fmt.Errorf("unable to allocate IPs for already annotated pod: %s, error: %v", pod.Name, err)
+		}
 	} else {
 		podMac, podIfAddrs, err = oc.getPortAddresses(logicalSwitch, portName)
 		if err != nil {
