@@ -410,23 +410,20 @@ var _ = Describe("OVN Pod Operations", func() {
 				)
 				t.populateLogicalSwitchCache(fakeOvn)
 				mockAddNBDBError(ovntest.LogicalSwitchPortType, t.portName,
-					ovntest.LogicalSwitchPortPortSecurity,
+					ovntest.LogicalSwitchPortExternalId,
 					fmt.Errorf("injected dummy port security set error"),
 					fakeOvn.ovnNBClient)
 				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 				Expect(fExec.CalledMatchesExpected()).To(BeTrue(), fExec.ErrorDesc)
 				mockDelNBDBError(ovntest.LogicalSwitchPortType, t.portName,
-					ovntest.LogicalSwitchPortPortSecurity,
+					ovntest.LogicalSwitchPortExternalId,
 					fakeOvn.ovnNBClient)
 
 				// Pod creation should be retried on Update event
 				t.addPodDenyMcast(fExec)
-				_, err := fakeOvn.fakeClient.CoreV1().Pods(t.namespace).Update(context.TODO(), newPod(t.namespace, t.podName, t.nodeName, t.podIP), metav1.UpdateOptions{})
-				Expect(err).NotTo(HaveOccurred())
 				Eventually(fExec.CalledMatchesExpected).Should(BeTrue(), fExec.ErrorDesc)
 				Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient, t.namespace, t.podName) }, 2).Should(MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-
 				return nil
 			}
 
@@ -625,6 +622,7 @@ var _ = Describe("OVN Pod Operations", func() {
 
 				fakeOvn.restart()
 				t.populateLogicalSwitchCache(fakeOvn)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient, t.namespace, t.podName) }, 2).Should(MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
@@ -687,6 +685,7 @@ var _ = Describe("OVN Pod Operations", func() {
 
 				fakeOvn.restart()
 				t.populateLogicalSwitchCache(fakeOvn)
+				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
 				Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient, t.namespace, t.podName) }, 2).Should(MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
