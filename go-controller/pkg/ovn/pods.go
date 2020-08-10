@@ -419,6 +419,32 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 			}
 		}
 
+		podAnnotation := util.PodAnnotation{
+			IPs: podIfAddrs,
+			MAC: podMac,
+		}
+		var nodeSubnets []*net.IPNet
+		if nodeSubnets = oc.lsManager.GetSwitchSubnets(logicalSwitch); nodeSubnets == nil {
+			return fmt.Errorf("cannot retrieve subnet for assigning gateway routes for pod %s, node: %s",
+				pod.Name, logicalSwitch)
+		}
+		err = oc.addRoutesGatewayIP(pod, &podAnnotation, nodeSubnets)
+		if err != nil {
+			return err
+		}
+		var marshalledAnnotation map[string]string
+		marshalledAnnotation, err = util.MarshalPodAnnotation(&podAnnotation)
+		if err != nil {
+			return fmt.Errorf("error creating pod network annotation: %v", err)
+		}
+
+		klog.V(5).Infof("Annotation values: ip=%v ; mac=%s ; gw=%s\nAnnotation=%s",
+			podIfAddrs, podMac, podAnnotation.Gateways, marshalledAnnotation)
+		if err = oc.kube.SetAnnotationsOnPod(pod, marshalledAnnotation); err != nil {
+			return fmt.Errorf("failed to set annotation on pod %s: %v", pod.Name, err)
+		}
+		clearAnnotation = true
+
 		var networks []*types.NetworkSelectionElement
 
 		networks, err = util.GetPodNetSelAnnotation(pod, util.DefNetworkAnnotation)
@@ -560,35 +586,8 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 		return err
 	}
 
-	if annotation == nil {
-		podAnnotation := util.PodAnnotation{
-			IPs: podIfAddrs,
-			MAC: podMac,
-		}
-		var nodeSubnets []*net.IPNet
-		if nodeSubnets = oc.lsManager.GetSwitchSubnets(logicalSwitch); nodeSubnets == nil {
-			return fmt.Errorf("cannot retrieve subnet for assigning gateway routes for pod %s, node: %s",
-				pod.Name, logicalSwitch)
-		}
-		err = oc.addRoutesGatewayIP(pod, &podAnnotation, nodeSubnets)
-		if err != nil {
-			return err
-		}
-		var marshalledAnnotation map[string]string
-		marshalledAnnotation, err = util.MarshalPodAnnotation(&podAnnotation)
-		if err != nil {
-			return fmt.Errorf("error creating pod network annotation: %v", err)
-		}
-
-		klog.V(5).Infof("Annotation values: ip=%v ; mac=%s ; gw=%s\nAnnotation=%s",
-			podIfAddrs, podMac, podAnnotation.Gateways, marshalledAnnotation)
-		if err = oc.kube.SetAnnotationsOnPod(pod, marshalledAnnotation); err != nil {
-			return fmt.Errorf("failed to set annotation on pod %s: %v", pod.Name, err)
-		}
-
-		// observe the pod creation latency metric.
-		metrics.RecordPodCreated(pod)
-	}
+	// observe the pod creation latency metric.
+	metrics.RecordPodCreated(pod)
 
 	return nil
 }
