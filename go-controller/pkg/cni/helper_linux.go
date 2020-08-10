@@ -306,6 +306,10 @@ func (pr *PodRequest) ConfigureInterface(namespace string, podName string, ifInf
 		klog.Warningf("Failed to settle addresses: %q", err)
 	}
 
+	if err = waitForPodFlows(ifInfo.MAC.String()); err != nil {
+		return nil, fmt.Errorf("timed out dumping br-int flow entries for sandbox: %v", err)
+	}
+
 	return []*current.Interface{hostIface, contIface}, nil
 }
 
