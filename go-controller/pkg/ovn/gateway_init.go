@@ -14,13 +14,15 @@ import (
 )
 
 // gatewayInit creates a gateway router for the local chassis.
-func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*net.IPNet, joinSubnets []*net.IPNet, l3GatewayConfig *util.L3GatewayConfig, sctpSupport bool) error {
+func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*net.IPNet, joinSubnets []*net.IPNet,
+	l3GatewayConfig *util.L3GatewayConfig, sctpSupport bool) error {
 	// Create a gateway router.
 	gatewayRouter := gwRouterPrefix + nodeName
 	physicalIPs := make([]string, len(l3GatewayConfig.IPAddresses))
 	for i, ip := range l3GatewayConfig.IPAddresses {
 		physicalIPs[i] = ip.IP.String()
 	}
+
 	stdout, stderr, err := util.RunOVNNbctl("--", "--may-exist", "lr-add",
 		gatewayRouter, "--", "set", "logical_router", gatewayRouter,
 		"options:chassis="+l3GatewayConfig.ChassisID,
@@ -105,17 +107,18 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 			"stderr: %q, error: %v", drRouterPort, ovnClusterRouter, stderr, err)
 	}
 
-	// When there are multiple gateway routers (which would be the likely
-	// default for any sane deployment), we need to SNAT traffic
-	// heading to the logical space with the Gateway router's IP so that
-	// return traffic comes back to the same gateway router.
-	stdout, stderr, err = util.RunOVNNbctl("set", "logical_router",
-		gatewayRouter, "options:lb_force_snat_ip="+util.JoinIPs(gwLRPIPs, " "))
-	if err != nil {
-		return fmt.Errorf("failed to set logical router %s's lb_force_snat_ip option, "+
-			"stdout: %q, stderr: %q, error: %v", gatewayRouter, stdout, stderr, err)
+	if config.Gateway.Mode != config.GatewayModeLocal {
+		// When there are multiple gateway routers (which would be the likely
+		// default for any sane deployment), we need to SNAT traffic
+		// heading to the logical space with the Gateway router's IP so that
+		// return traffic comes back to the same gateway router.
+		stdout, stderr, err = util.RunOVNNbctl("set", "logical_router",
+			gatewayRouter, "options:lb_force_snat_ip="+util.JoinIPs(gwLRPIPs, " "))
+		if err != nil {
+			return fmt.Errorf("failed to set logical router %s's lb_force_snat_ip option, "+
+				"stdout: %q, stderr: %q, error: %v", gatewayRouter, stdout, stderr, err)
+		}
 	}
-
 	for _, entry := range clusterIPSubnet {
 		drLRPIP, err := util.MatchIPFamily(utilnet.IsIPv6CIDR(entry), drLRPIPs)
 		if err != nil {
@@ -286,13 +289,15 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 				ovnClusterRouter, err)
 		}
 
-		stdout, stderr, err = util.RunOVNNbctl("--may-exist",
-			"--policy=src-ip", "lr-route-add", ovnClusterRouter,
-			hostSubnet.String(), gwLRPIP.String())
-		if err != nil {
-			return fmt.Errorf("failed to add source IP address based "+
-				"routes in distributed router %s, stdout: %q, "+
-				"stderr: %q, error: %v", ovnClusterRouter, stdout, stderr, err)
+		if config.Gateway.Mode != config.GatewayModeLocal {
+			stdout, stderr, err = util.RunOVNNbctl("--may-exist",
+				"--policy=src-ip", "lr-route-add", ovnClusterRouter,
+				hostSubnet.String(), gwLRPIP.String())
+			if err != nil {
+				return fmt.Errorf("failed to add source IP address based "+
+					"routes in distributed router %s, stdout: %q, "+
+					"stderr: %q, error: %v", ovnClusterRouter, stdout, stderr, err)
+			}
 		}
 	}
 
