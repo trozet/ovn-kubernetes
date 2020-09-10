@@ -313,7 +313,7 @@ func addDefaultConntrackRulesHybrid(nodeName, gwBridge, gwIntf string, stopChan 
 		if cidr.IP.To4() != nil {
 			ipPrefix = "ip"
 		} else {
-			ipPrefix = "ip6"
+			ipPrefix = "ipv6"
 		}
 		mask, _ := cidr.Mask.Size()
 		_, stderr, err = util.RunOVSOfctl("add-flow", gwBridge,
@@ -325,6 +325,18 @@ func addDefaultConntrackRulesHybrid(nodeName, gwBridge, gwIntf string, stopChan 
 		}
 		nFlows++
 
+	}
+
+	if config.IPv6Mode {
+		// REMOVEME(trozet) when https://bugzilla.kernel.org/show_bug.cgi?id=11797 is resolved
+		// must flood icmpv6 traffic as it fails to create a CT entry
+		_, stderr, err = util.RunOVSOfctl("add-flow", gwBridge,
+			fmt.Sprintf("cookie=%s, priority=1, table=1,icmp6 actions=FLOOD", defaultOpenFlowCookie))
+		if err != nil {
+			return fmt.Errorf("failed to add openflow flow to %s, stderr: %q, "+
+				"error: %v", gwBridge, stderr, err)
+		}
+		nFlows++
 	}
 
 	// table 1, all other connections go to host
