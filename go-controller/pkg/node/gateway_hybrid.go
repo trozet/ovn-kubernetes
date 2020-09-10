@@ -54,6 +54,14 @@ func (n *OvnNode) initHybridGateway(hostSubnets []*net.IPNet, gwIntf string, nod
 		return nil, err
 	}
 
+	// bounce interface to get link local address back for ipv6
+	if _, err = util.LinkSetDown(localnetGatewayNextHopPort); err != nil {
+		return nil, err
+	}
+	if _, err = util.LinkSetUp(localnetGatewayNextHopPort); err != nil {
+		return nil, err
+	}
+
 	var gatewayIfAddrs []*net.IPNet
 	var nextHops []net.IP
 	for _, hostSubnet := range hostSubnets {
