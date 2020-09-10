@@ -445,7 +445,7 @@ func (oc *Controller) syncGatewayLogicalNetwork(node *kapi.Node, l3GatewayConfig
 		return fmt.Errorf("failed to init shared interface gateway: %v", err)
 	}
 
-	if l3GatewayConfig.Mode == config.GatewayModeShared || config.Gateway.Mode == config.GatewayModeHybrid {
+	if l3GatewayConfig.Mode == config.GatewayModeShared || hybridGatewayConfig != nil {
 		// in the case of shared gateway mode, we need to setup
 		// 1. two policy based routes to steer traffic to the k8s node IP
 		// 	  - from the management port via the node_local_switch's localnet port
@@ -462,7 +462,7 @@ func (oc *Controller) syncGatewayLogicalNetwork(node *kapi.Node, l3GatewayConfig
 		for _, subnet := range subnets {
 			hostIfAddr := util.GetNodeManagementIfAddr(subnet)
 			var l3GatewayConfigIP *net.IPNet
-			if config.Gateway.Mode == config.GatewayModeHybrid {
+			if hybridGatewayConfig != nil {
 				l3GatewayConfigIP, err = util.MatchIPFamily(utilnet.IsIPv6(hostIfAddr.IP), hybridGatewayConfig.IPAddresses)
 			} else {
 				l3GatewayConfigIP, err = util.MatchIPFamily(utilnet.IsIPv6(hostIfAddr.IP), l3GatewayConfig.IPAddresses)

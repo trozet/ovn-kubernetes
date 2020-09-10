@@ -232,8 +232,8 @@ func addDefaultConntrackRulesHybrid(nodeName, gwBridge, gwIntf string, stopChan 
 		// table 0, packets coming from pods headed externally. Commit connections
 		// so that reverse direction goes back to the pods.
 		_, stderr, err = util.RunOVSOfctl("add-flow", gwBridge,
-			fmt.Sprintf("cookie=%s, priority=100, in_port=%s, ip, "+
-				"actions=ct(commit, exec(load:0x1->NXM_NX_CT_LABEL),, zone=%d), output:%s",
+			fmt.Sprintf("cookie=%s, priority=100, table=0, in_port=%s, ip, "+
+				"actions=ct(commit, exec(load:0x1->NXM_NX_CT_LABEL), zone=%d), output:%s",
 				defaultOpenFlowCookie, ofportPatch, config.Default.ConntrackZone, ofportPhys))
 		if err != nil {
 			return fmt.Errorf("failed to add openflow flow to %s, stderr: %q, "+
@@ -244,7 +244,7 @@ func addDefaultConntrackRulesHybrid(nodeName, gwBridge, gwIntf string, stopChan 
 		// table 0, packets coming from external. Send it through conntrack and
 		// resubmit to table 1 to know the state of the connection.
 		_, stderr, err = util.RunOVSOfctl("add-flow", gwBridge,
-			fmt.Sprintf("cookie=%s, priority=50, in_port=%s, ip, "+
+			fmt.Sprintf("cookie=%s, priority=50, table=0, in_port=%s, ip, "+
 				"actions=ct(zone=%d, table=1)", defaultOpenFlowCookie, ofportPhys, config.Default.ConntrackZone))
 		if err != nil {
 			return fmt.Errorf("failed to add openflow flow to %s, stderr: %q, "+
@@ -256,8 +256,8 @@ func addDefaultConntrackRulesHybrid(nodeName, gwBridge, gwIntf string, stopChan 
 		// table 0, packets coming from pods headed externally. Commit connections
 		// so that reverse direction goes back to the pods.
 		_, stderr, err = util.RunOVSOfctl("add-flow", gwBridge,
-			fmt.Sprintf("cookie=%s, priority=100, in_port=%s, ipv6, "+
-				"actions=ct(commit, zone=%d), output:%s",
+			fmt.Sprintf("cookie=%s, priority=100, table=0, in_port=%s, ipv6, "+
+				"actions=ct(commit, exec(load:0x1->NXM_NX_CT_LABEL), zone=%d), output:%s",
 				defaultOpenFlowCookie, ofportPatch, config.Default.ConntrackZone, ofportPhys))
 		if err != nil {
 			return fmt.Errorf("failed to add openflow flow to %s, stderr: %q, "+
@@ -268,7 +268,7 @@ func addDefaultConntrackRulesHybrid(nodeName, gwBridge, gwIntf string, stopChan 
 		// table 0, packets coming from external. Send it through conntrack and
 		// resubmit to table 1 to know the state of the connection.
 		_, stderr, err = util.RunOVSOfctl("add-flow", gwBridge,
-			fmt.Sprintf("cookie=%s, priority=50, in_port=%s, ipv6, "+
+			fmt.Sprintf("cookie=%s, priority=50, table=0, in_port=%s, ipv6, "+
 				"actions=ct(zone=%d, table=1)", defaultOpenFlowCookie, ofportPhys, config.Default.ConntrackZone))
 		if err != nil {
 			return fmt.Errorf("failed to add openflow flow to %s, stderr: %q, "+
@@ -279,7 +279,7 @@ func addDefaultConntrackRulesHybrid(nodeName, gwBridge, gwIntf string, stopChan 
 
 	// table 0, packets coming from host should go out physical port
 	_, stderr, err = util.RunOVSOfctl("add-flow", gwBridge,
-		fmt.Sprintf("cookie=%s, priority=100, in_port=LOCAL, actions=output:%s",
+		fmt.Sprintf("cookie=%s, priority=100, table=0, in_port=LOCAL, actions=output:%s",
 			defaultOpenFlowCookie, ofportPhys))
 	if err != nil {
 		return fmt.Errorf("failed to add openflow flow to %s, stderr: %q, error: %v", gwBridge, stderr, err)
@@ -288,7 +288,7 @@ func addDefaultConntrackRulesHybrid(nodeName, gwBridge, gwIntf string, stopChan 
 
 	// table 0, packets coming from OVN that are not IP should go out of the host
 	_, stderr, err = util.RunOVSOfctl("add-flow", gwBridge,
-		fmt.Sprintf("cookie=%s, priority=99, in_port=%s, actions=output:%s",
+		fmt.Sprintf("cookie=%s, priority=99, table=0, in_port=%s, actions=output:%s",
 			defaultOpenFlowCookie, ofportPatch, ofportPhys))
 	if err != nil {
 		return fmt.Errorf("failed to add openflow flow to %s, stderr: %q, error: %v", gwBridge, stderr, err)
@@ -298,7 +298,7 @@ func addDefaultConntrackRulesHybrid(nodeName, gwBridge, gwIntf string, stopChan 
 
 	// table 1, known connections with ct_label 1 go to pod
 	_, stderr, err = util.RunOVSOfctl("add-flow", gwBridge,
-		fmt.Sprintf("cookie=%s, priority=100, table=1, ct_label=0x1,, "+
+		fmt.Sprintf("cookie=%s, priority=100, table=1, ct_label=0x1, "+
 			"actions=output:%s", defaultOpenFlowCookie, ofportPatch))
 	if err != nil {
 		return fmt.Errorf("failed to add openflow flow to %s, stderr: %q, "+

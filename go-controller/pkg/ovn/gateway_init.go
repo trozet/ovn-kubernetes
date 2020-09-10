@@ -22,7 +22,7 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 	for i, ip := range l3GatewayConfig.IPAddresses {
 		physicalIPs[i] = ip.IP.String()
 	}
-	if config.Gateway.Mode == config.GatewayModeHybrid {
+	if hybridGatewayConfig != nil {
 		for _, ip := range hybridGatewayConfig.IPAddresses {
 			physicalIPs = append(physicalIPs, ip.IP.String())
 		}
@@ -219,7 +219,7 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 		"--", "lsp-set-type", l3GatewayConfig.InterfaceID, "localnet",
 		"--", "lsp-set-options", l3GatewayConfig.InterfaceID, "network_name=" + util.PhysicalNetworkName}
 
-	if config.Gateway.Mode == config.GatewayModeHybrid {
+	if hybridGatewayConfig != nil {
 		// Create the external switch for the physical interface to connect to.
 		hybridExternalSwitch := hybridSwitchPrefix + nodeName
 		stdout, stderr, err = util.RunOVNNbctl("--may-exist", "ls-add",
@@ -284,7 +284,7 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 			"stderr: %q, error: %v", gatewayRouter, stdout, stderr, err)
 	}
 
-	if config.Gateway.Mode == config.GatewayModeHybrid {
+	if hybridGatewayConfig != nil {
 		hybridExternalSwitch := hybridSwitchPrefix + nodeName
 		// hybrid GR connection
 		cmdArgs = []string{
