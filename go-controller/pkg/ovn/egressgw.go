@@ -340,9 +340,9 @@ func (oc *Controller) addHybridRoutePolicyForPod(podIP net.IP, node string) erro
 		}
 		// get the GR to join switch ip address
 		out, stderr, err := util.RunOVNNbctl("--data=bare", "--no-heading", "--columns=networks", "find",
-			"logical_router_port", fmt.Sprintf("name=dtoj-%s", node))
+			"logical_router_port", fmt.Sprintf("name=rtoj-GR_%s", node))
 		if err != nil {
-			return fmt.Errorf("unable to find IP address for node: %s, dtoj port, stderr: %s, err: %v", node,
+			return fmt.Errorf("unable to find IP address for node: %s, rtoj port, stderr: %s, err: %v", node,
 				stderr, err)
 		}
 		grJoinIP, _, err := net.ParseCIDR(out)

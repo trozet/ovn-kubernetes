@@ -200,7 +200,7 @@ func (n *OvnNode) initGateway(subnets []*net.IPNet, nodeAnnotator kube.Annotator
 	// Wait for gateway resources to be created by the master if DisableSNATMultipleGWs is not set,
 	// as that option does not add default SNAT rules on the GR and the gatewayReady function checks
 	// those default NAT rules are present
-	if !config.Gateway.DisableSNATMultipleGWs {
+	if !config.Gateway.DisableSNATMultipleGWs && config.Gateway.Mode != config.GatewayModeLocal {
 		waiter.AddWait(gatewayReady, prFn)
 	} else {
 		waiter.AddWait(func() (bool, error) { return true, nil }, prFn)

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	"k8s.io/klog"
 
@@ -39,123 +38,6 @@ const (
 	// Routing table for ExternalIP communication
 	localnetGatewayExternalIDTable = "6"
 )
-
-func (n *OvnNode) initLocalnetGateway(hostSubnets []*net.IPNet, nodeAnnotator kube.Annotator, defaultGatewayIntf string) error {
-	// Create a localnet OVS bridge.
-	localnetBridgeName := "br-local"
-	_, stderr, err := util.RunOVSVsctl("--may-exist", "add-br",
-		localnetBridgeName)
-	if err != nil {
-		return fmt.Errorf("failed to create localnet bridge %s"+
-			", stderr:%s (%v)", localnetBridgeName, stderr, err)
-	}
-
-	ifaceID, _, err := bridgedGatewayNodeSetup(n.name, localnetBridgeName, localnetBridgeName,
-		util.PhysicalNetworkName, true)
-	if err != nil {
-		return fmt.Errorf("failed to set up shared interface gateway: %v", err)
-	}
-	_, err = util.LinkSetUp(localnetBridgeName)
-	if err != nil {
-		return err
-	}
-
-	// Create a localnet bridge gateway port
-	_, stderr, err = util.RunOVSVsctl(
-		"--if-exists", "del-port", localnetBridgeName, legacyLocalnetGatewayNextHopPort,
-		"--", "--may-exist", "add-port", localnetBridgeName, localnetGatewayNextHopPort,
-		"--", "set", "interface", localnetGatewayNextHopPort, "type=internal",
-		"mtu_request="+fmt.Sprintf("%d", config.Default.MTU),
-		fmt.Sprintf("mac=%s", strings.ReplaceAll(localnetGatewayNextHopMac, ":", "\\:")))
-	if err != nil {
-		return fmt.Errorf("failed to create localnet bridge gateway port %s"+
-			", stderr:%s (%v)", localnetGatewayNextHopPort, stderr, err)
-	}
-	link, err := util.LinkSetUp(localnetGatewayNextHopPort)
-	if err != nil {
-		return err
-	}
-	// Flush any addresses on localnetGatewayNextHopPort first
-	if err := util.LinkAddrFlush(link); err != nil {
-		return err
-	}
-
-	// bounce interface to get link local address back for ipv6
-	if _, err = util.LinkSetDown(localnetGatewayNextHopPort); err != nil {
-		return err
-	}
-	if _, err = util.LinkSetUp(localnetGatewayNextHopPort); err != nil {
-		return err
-	}
-
-	var gatewayIfAddrs []*net.IPNet
-	var nextHops []net.IP
-	for _, hostSubnet := range hostSubnets {
-		var gatewayIP, gatewayNextHop net.IP
-		var gatewaySubnetMask net.IPMask
-		if utilnet.IsIPv6CIDR(hostSubnet) {
-			gatewayIP = net.ParseIP(v6localnetGatewayIP)
-			gatewayNextHop = net.ParseIP(v6localnetGatewayNextHop)
-			gatewaySubnetMask = net.CIDRMask(v6localnetGatewaySubnetPrefix, 128)
-		} else {
-			gatewayIP = net.ParseIP(v4localnetGatewayIP)
-			gatewayNextHop = net.ParseIP(v4localnetGatewayNextHop)
-			gatewaySubnetMask = net.CIDRMask(v4localnetGatewaySubnetPrefix, 32)
-		}
-		gatewayIfAddr := &net.IPNet{IP: gatewayIP, Mask: gatewaySubnetMask}
-		gatewayNextHopIfAddr := &net.IPNet{IP: gatewayNextHop, Mask: gatewaySubnetMask}
-		gatewayIfAddrs = append(gatewayIfAddrs, gatewayIfAddr)
-		nextHops = append(nextHops, gatewayNextHop)
-
-		if err = util.LinkAddrAdd(link, gatewayNextHopIfAddr); err != nil {
-			return err
-		}
-	}
-
-	n.initLocalEgressIP(gatewayIfAddrs, defaultGatewayIntf)
-
-	chassisID, err := util.GetNodeChassisID()
-	if err != nil {
-		return err
-	}
-
-	gwMacAddress, _ := net.ParseMAC(localnetGatewayMac)
-
-	err = util.SetL3GatewayConfig(nodeAnnotator, &util.L3GatewayConfig{
-		Mode:           config.GatewayModeLocal,
-		ChassisID:      chassisID,
-		InterfaceID:    ifaceID,
-		MACAddress:     gwMacAddress,
-		IPAddresses:    gatewayIfAddrs,
-		NextHops:       nextHops,
-		NodePortEnable: config.Gateway.NodeportEnable,
-	})
-	if err != nil {
-		return err
-	}
-
-	for _, ifaddr := range gatewayIfAddrs {
-		err = initLocalGatewayNATRules(localnetGatewayNextHopPort, ifaddr.IP)
-		if err != nil {
-			return fmt.Errorf("failed to add NAT rules for localnet gateway (%v)", err)
-		}
-	}
-
-	if config.Gateway.NodeportEnable {
-		localAddrSet, err := getLocalAddrs()
-		if err != nil {
-			return err
-		}
-		err = n.watchLocalPorts(
-			newLocalPortWatcherData(gatewayIfAddrs, n.recorder, localAddrSet, nil),
-		)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
 
 func getGatewayFamilyAddrs(gatewayIfAddrs []*net.IPNet) (string, string) {
 	var gatewayIPv4, gatewayIPv6 string

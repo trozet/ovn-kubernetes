@@ -85,7 +85,9 @@ func (n *OvnNode) createManagementPort(hostSubnets []*net.IPNet, nodeAnnotator k
 					"stderr: %q, error: %v", ovnClusterRouter, stdout, stderr, err)
 			}
 			// add iptables masquerading for mp0 to exit the host for egress
-			err = initLocalGatewayNATRules(util.K8sMgmtIntfName, nextHop.IP)
+			cidr := nextHop.IP.Mask(nextHop.Mask)
+			cidrNet := &net.IPNet{IP: cidr, Mask: nextHop.Mask}
+			err = initLocalGatewayNATRules(util.K8sMgmtIntfName, cidrNet)
 			if err != nil {
 				return fmt.Errorf("failed to add local NAT rules for: %s, err: %v", util.K8sMgmtIntfName, err)
 			}

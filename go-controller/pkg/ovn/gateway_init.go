@@ -304,7 +304,7 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 	// if config.Gateway.DisabledSNATMultipleGWs is not set (by default is not),
 	// the NAT rules for pods not having annotations to route thru either external
 	// gws or pod CNFs will be added within pods.go addLogicalPort
-	if !config.Gateway.DisableSNATMultipleGWs {
+	if !config.Gateway.DisableSNATMultipleGWs && config.Gateway.Mode != config.GatewayModeLocal {
 		// Default SNAT rules.
 		externalIPs := make([]net.IP, len(l3GatewayConfig.IPAddresses))
 		for i, ip := range l3GatewayConfig.IPAddresses {
@@ -476,6 +476,7 @@ func addPolicyBasedRoutes(nodeName, mgmtPortIP string, hostIfAddr *net.IPNet) er
 		}
 	}
 
+	// policy to allow host -> service -> hairpin back to host
 	matchStr = fmt.Sprintf("%s.src == %s && %s.dst == %s /* %s */",
 		l3Prefix, mgmtPortIP, l3Prefix, hostIfAddr.IP.String(), nodeName)
 	_, stderr, err = util.RunOVNNbctl("lr-policy-add", ovnClusterRouter, mgmtPortPolicyPriority, matchStr,
@@ -486,6 +487,23 @@ func addPolicyBasedRoutes(nodeName, mgmtPortIP string, hostIfAddr *net.IPNet) er
 				"stderr: %s, error: %v", matchStr, nodeName, ovnClusterRouter, stderr, err)
 		}
 	}
+
+	if config.Gateway.Mode == config.GatewayModeLocal {
+		ipMask := hostIfAddr.IP.Mask(hostIfAddr.Mask)
+		hostNet := &net.IPNet{IP: ipMask, Mask: hostIfAddr.Mask}
+		// Local gw mode needs to use DGP to do hostA -> service -> hostB
+		matchStr = fmt.Sprintf("%s.src == %s && %s.dst == %s /* inter-%s */",
+			l3Prefix, mgmtPortIP, l3Prefix, hostNet.String(), nodeName)
+		_, stderr, err = util.RunOVNNbctl("lr-policy-add", ovnClusterRouter, interNodePolicyPriority, matchStr,
+			"reroute", natSubnetNextHop)
+		if err != nil {
+			if !strings.Contains(stderr, "already existed") {
+				return fmt.Errorf("failed to add policy route '%s' for host %q on %s "+
+					"stderr: %s, error: %v", matchStr, nodeName, ovnClusterRouter, stderr, err)
+			}
+		}
+	}
+
 	return nil
 }
 
