@@ -245,10 +245,8 @@ func (oc *Controller) SetupMaster(masterNodeName string) error {
 		return err
 	}
 
-	if config.Gateway.Mode == config.GatewayModeShared {
-		if err := addDistributedGWPort(); err != nil {
-			return err
-		}
+	if err := addDistributedGWPort(); err != nil {
+		return err
 	}
 
 	// Determine SCTP support
@@ -427,7 +425,7 @@ func (oc *Controller) syncNodeManagementPort(node *kapi.Node, hostSubnets []*net
 }
 
 func (oc *Controller) syncGatewayLogicalNetwork(node *kapi.Node, l3GatewayConfig *util.L3GatewayConfig,
-	hybridGatewayConfig *util.L3GatewayConfig, hostSubnets []*net.IPNet) error {
+	hostSubnets []*net.IPNet) error {
 	var err error
 	var clusterSubnets []*net.IPNet
 	for _, clusterSubnet := range config.Default.ClusterSubnets {
@@ -440,45 +438,36 @@ func (oc *Controller) syncGatewayLogicalNetwork(node *kapi.Node, l3GatewayConfig
 		return err
 	}
 
-	err = gatewayInit(node.Name, clusterSubnets, hostSubnets, joinSubnets, l3GatewayConfig, hybridGatewayConfig, oc.SCTPSupport)
+	err = gatewayInit(node.Name, clusterSubnets, hostSubnets, joinSubnets, l3GatewayConfig, oc.SCTPSupport)
 	if err != nil {
 		return fmt.Errorf("failed to init shared interface gateway: %v", err)
 	}
 
-	if l3GatewayConfig.Mode == config.GatewayModeShared || hybridGatewayConfig != nil {
-		// in the case of shared gateway mode, we need to setup
-		// 1. two policy based routes to steer traffic to the k8s node IP
-		// 	  - from the management port via the node_local_switch's localnet port
-		//    - from the hostsubnet via management port
-		// 2. a dnat_and_snat nat entry to SNAT the traffic from the management port
-		subnets, err := util.ParseNodeHostSubnetAnnotation(node)
-		if err != nil {
-			return fmt.Errorf("failed to get host subnets for %s: %v", node.Name, err)
-		}
-		mpMAC, err := util.ParseNodeManagementPortMACAddress(node)
+	// in the case of shared gateway mode, we need to setup
+	// 1. two policy based routes to steer traffic to the k8s node IP
+	// 	  - from the management port via the node_local_switch's localnet port
+	//    - from the hostsubnet via management port
+	// 2. a dnat_and_snat nat entry to SNAT the traffic from the management port
+	subnets, err := util.ParseNodeHostSubnetAnnotation(node)
+	if err != nil {
+		return fmt.Errorf("failed to get host subnets for %s: %v", node.Name, err)
+	}
+	mpMAC, err := util.ParseNodeManagementPortMACAddress(node)
+	if err != nil {
+		return err
+	}
+	for _, subnet := range subnets {
+		hostIfAddr := util.GetNodeManagementIfAddr(subnet)
+		l3GatewayConfigIP, err := util.MatchIPNetFamily(utilnet.IsIPv6(hostIfAddr.IP), l3GatewayConfig.IPAddresses)
 		if err != nil {
 			return err
 		}
-		for _, subnet := range subnets {
-			hostIfAddr := util.GetNodeManagementIfAddr(subnet)
+		if err := addPolicyBasedRoutes(node.Name, hostIfAddr.IP.String(), l3GatewayConfigIP); err != nil {
+			return err
+		}
 
-			var l3GatewayConfigIP *net.IPNet
-
-			if hybridGatewayConfig != nil {
-				l3GatewayConfigIP, err = util.MatchIPNetFamily(utilnet.IsIPv6(hostIfAddr.IP), hybridGatewayConfig.IPAddresses)
-			} else {
-				l3GatewayConfigIP, err = util.MatchIPNetFamily(utilnet.IsIPv6(hostIfAddr.IP), l3GatewayConfig.IPAddresses)
-			}
-			if err != nil {
-				return err
-			}
-			if err := addPolicyBasedRoutes(node.Name, hostIfAddr.IP.String(), l3GatewayConfigIP); err != nil {
-				return err
-			}
-
-			if err := oc.addNodeLocalNatEntries(node, mpMAC.String(), hostIfAddr); err != nil {
-				return err
-			}
+		if err := oc.addNodeLocalNatEntries(node, mpMAC.String(), hostIfAddr); err != nil {
+			return err
 		}
 	}
 

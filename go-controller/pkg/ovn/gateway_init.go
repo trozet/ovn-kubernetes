@@ -15,18 +15,14 @@ import (
 
 // gatewayInit creates a gateway router for the local chassis.
 func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*net.IPNet, joinSubnets []*net.IPNet,
-	l3GatewayConfig, hybridGatewayConfig *util.L3GatewayConfig, sctpSupport bool) error {
+	l3GatewayConfig *util.L3GatewayConfig, sctpSupport bool) error {
 	// Create a gateway router.
 	gatewayRouter := gwRouterPrefix + nodeName
 	physicalIPs := make([]string, len(l3GatewayConfig.IPAddresses))
 	for i, ip := range l3GatewayConfig.IPAddresses {
 		physicalIPs[i] = ip.IP.String()
 	}
-	if hybridGatewayConfig != nil {
-		for _, ip := range hybridGatewayConfig.IPAddresses {
-			physicalIPs = append(physicalIPs, ip.IP.String())
-		}
-	}
+
 	stdout, stderr, err := util.RunOVNNbctl("--", "--may-exist", "lr-add",
 		gatewayRouter, "--", "set", "logical_router", gatewayRouter,
 		"options:chassis="+l3GatewayConfig.ChassisID,
@@ -111,17 +107,18 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 			"stderr: %q, error: %v", drRouterPort, ovnClusterRouter, stderr, err)
 	}
 
-	// When there are multiple gateway routers (which would be the likely
-	// default for any sane deployment), we need to SNAT traffic
-	// heading to the logical space with the Gateway router's IP so that
-	// return traffic comes back to the same gateway router.
-	stdout, stderr, err = util.RunOVNNbctl("set", "logical_router",
-		gatewayRouter, "options:lb_force_snat_ip="+util.JoinIPs(gwLRPIPs, " "))
-	if err != nil {
-		return fmt.Errorf("failed to set logical router %s's lb_force_snat_ip option, "+
-			"stdout: %q, stderr: %q, error: %v", gatewayRouter, stdout, stderr, err)
+	if config.Gateway.Mode != config.GatewayModeLocal {
+		// When there are multiple gateway routers (which would be the likely
+		// default for any sane deployment), we need to SNAT traffic
+		// heading to the logical space with the Gateway router's IP so that
+		// return traffic comes back to the same gateway router.
+		stdout, stderr, err = util.RunOVNNbctl("set", "logical_router",
+			gatewayRouter, "options:lb_force_snat_ip="+util.JoinIPs(gwLRPIPs, " "))
+		if err != nil {
+			return fmt.Errorf("failed to set logical router %s's lb_force_snat_ip option, "+
+				"stdout: %q, stderr: %q, error: %v", gatewayRouter, stdout, stderr, err)
+		}
 	}
-
 	for _, entry := range clusterIPSubnet {
 		drLRPIP, err := util.MatchIPFamily(utilnet.IsIPv6CIDR(entry), drLRPIPs)
 		if err != nil {
@@ -216,23 +213,6 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 		"--", "lsp-set-type", l3GatewayConfig.InterfaceID, "localnet",
 		"--", "lsp-set-options", l3GatewayConfig.InterfaceID, "network_name=" + util.PhysicalNetworkName}
 
-	if hybridGatewayConfig != nil {
-		// Create the external switch for the physical interface to connect to.
-		hybridExternalSwitch := hybridSwitchPrefix + nodeName
-		stdout, stderr, err = util.RunOVNNbctl("--may-exist", "ls-add",
-			hybridExternalSwitch)
-		if err != nil {
-			return fmt.Errorf("failed to create logical switch %s, stdout: %q, "+
-				"stderr: %q, error: %v", hybridExternalSwitch, stdout, stderr, err)
-		}
-
-		cmdArgs = append(cmdArgs, []string{
-			"--", "--may-exist", "lsp-add", hybridExternalSwitch, hybridGatewayConfig.InterfaceID,
-			"--", "lsp-set-addresses", hybridGatewayConfig.InterfaceID, "unknown",
-			"--", "lsp-set-type", hybridGatewayConfig.InterfaceID, "localnet",
-			"--", "lsp-set-options", hybridGatewayConfig.InterfaceID, "network_name=" + util.HybridNetworkName}...)
-	}
-
 	if l3GatewayConfig.VLANID != nil {
 		lspArgs := []string{
 			"--", "set", "logical_switch_port", l3GatewayConfig.InterfaceID,
@@ -281,80 +261,6 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 			"stderr: %q, error: %v", gatewayRouter, stdout, stderr, err)
 	}
 
-	if hybridGatewayConfig != nil {
-		hybridExternalSwitch := hybridSwitchPrefix + nodeName
-		// hybrid GR connection
-		cmdArgs = []string{
-			"--", "--if-exists", "lrp-del", gwRouterToHybridSwitchPrefix + gatewayRouter,
-			"--", "lrp-add", gatewayRouter, gwRouterToHybridSwitchPrefix + gatewayRouter,
-			hybridGatewayConfig.MACAddress.String(),
-		}
-		for _, ip := range hybridGatewayConfig.IPAddresses {
-			cmdArgs = append(cmdArgs, ip.String())
-		}
-		cmdArgs = append(cmdArgs,
-			"--", "set", "logical_router_port", gwRouterToHybridSwitchPrefix+gatewayRouter,
-			"external-ids:gateway-physical-ip=yes")
-
-		stdout, stderr, err = util.RunOVNNbctl(cmdArgs...)
-		if err != nil {
-			return fmt.Errorf("failed to add logical port to router %s, stdout: %q, "+
-				"stderr: %q, error: %v", gatewayRouter, stdout, stderr, err)
-		}
-
-		// Connect the external_switch to the router.
-		stdout, stderr, err = util.RunOVNNbctl("--", "--may-exist", "lsp-add",
-			hybridExternalSwitch, hybridSwitchToGwRouterPrefix+gatewayRouter, "--", "set",
-			"logical_switch_port", hybridSwitchToGwRouterPrefix+gatewayRouter, "type=router",
-			"options:router-port="+gwRouterToHybridSwitchPrefix+gatewayRouter,
-			"addresses="+"\""+hybridGatewayConfig.MACAddress.String()+"\"")
-		if err != nil {
-			return fmt.Errorf("failed to add logical port to router %s, stdout: %q, "+
-				"stderr: %q, error: %v", gatewayRouter, stdout, stderr, err)
-		}
-
-		// add policy route to force host network destined traffic through br-local
-		for _, addr := range hybridGatewayConfig.IPAddresses {
-			var l3Prefix, localNextHop string
-			if utilnet.IsIPv6(addr.IP) {
-				l3Prefix = "ip6"
-				// find br-local next hop
-				for _, nextHop := range l3GatewayConfig.NextHops {
-					if utilnet.IsIPv6(nextHop) {
-						localNextHop = nextHop.String()
-						break
-					}
-				}
-			} else {
-				l3Prefix = "ip4"
-				for _, nextHop := range l3GatewayConfig.NextHops {
-					if nextHop.To4() != nil {
-						localNextHop = nextHop.String()
-						break
-					}
-				}
-			}
-			if localNextHop == "" {
-				return fmt.Errorf("unable to find br-local next hop for ip type: %s, ips: %v", l3Prefix,
-					l3GatewayConfig.NextHops)
-			}
-			// IPNet passed into annotation is currently wrong. It is a full IP/mask like 169.55.22.2/24 instead of
-			// 169.55.22.0/24 so need to get proper ipMask
-			ipMask := addr.IP.Mask(addr.Mask)
-			netMask, _ := addr.Mask.Size()
-			matchStr := fmt.Sprintf(`inport == "rtoj-%s" && %s.dst == %s/%d`, gatewayRouter, l3Prefix, ipMask, netMask)
-			_, stderr, err := util.RunOVNNbctl("lr-policy-add", gatewayRouter,
-				"1001", matchStr, "reroute", localNextHop)
-			if err != nil {
-				// TODO: lr-policy-add doesn't support --may-exist, resort to this workaround for now.
-				// Have raised an issue against ovn repository (https://github.com/ovn-org/ovn/issues/49)
-				if !strings.Contains(stderr, "already existed") {
-					return fmt.Errorf("failed to add policy route '%s' for host %q on %s "+
-						"stderr: %s, error: %v", matchStr, nodeName, gatewayRouter, stderr, err)
-				}
-			}
-		}
-	}
 	// Add static routes in GR with gateway router as the default next hop.
 	for _, nextHop := range l3GatewayConfig.NextHops {
 		var allIPs string
@@ -383,13 +289,15 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 				ovnClusterRouter, err)
 		}
 
-		stdout, stderr, err = util.RunOVNNbctl("--may-exist",
-			"--policy=src-ip", "lr-route-add", ovnClusterRouter,
-			hostSubnet.String(), gwLRPIP.String())
-		if err != nil {
-			return fmt.Errorf("failed to add source IP address based "+
-				"routes in distributed router %s, stdout: %q, "+
-				"stderr: %q, error: %v", ovnClusterRouter, stdout, stderr, err)
+		if config.Gateway.Mode != config.GatewayModeLocal {
+			stdout, stderr, err = util.RunOVNNbctl("--may-exist",
+				"--policy=src-ip", "lr-route-add", ovnClusterRouter,
+				hostSubnet.String(), gwLRPIP.String())
+			if err != nil {
+				return fmt.Errorf("failed to add source IP address based "+
+					"routes in distributed router %s, stdout: %q, "+
+					"stderr: %q, error: %v", ovnClusterRouter, stdout, stderr, err)
+			}
 		}
 	}
 

@@ -250,11 +250,8 @@ func (npw *localPortWatcherData) addService(svc *kapi.Service) error {
 			if gatewayIP != "" {
 				// Fix Azure/GCP LoadBalancers. They will forward traffic directly to the node with the
 				// dest address as the load-balancer ingress IP and port
-				iptRules = append(iptRules, getLoadBalancerIPTRules(svc, port, gatewayIP, port.NodePort)...)
-				iptRules = append(iptRules, getNodePortIPTRules(port, nil, gatewayIP, port.NodePort)...)
-				if config.Gateway.Mode == config.GatewayModeHybrid {
-					iptRules = append(iptRules, getHybridNodePortIPTRules(port, npw.nodeIP, svc.Spec.ClusterIP)...)
-				}
+				iptRules = append(iptRules, getLoadBalancerIPTRules(svc, port, svc.Spec.ClusterIP, port.Port)...)
+				iptRules = append(iptRules, getNodePortIPTRules(port, nil, svc.Spec.ClusterIP, port.Port)...)
 				klog.V(5).Infof("Will add iptables rule for NodePort and Cloud load balancers: %v and "+
 					"protocol: %v", port.NodePort, port.Protocol)
 			} else {
@@ -318,11 +315,8 @@ func (npw *localPortWatcherData) deleteService(svc *kapi.Service) error {
 			if gatewayIP != "" {
 				// Fix Azure/GCP LoadBalancers. They will forward traffic directly to the node with the
 				// dest address as the load-balancer ingress IP and port
-				iptRules = append(iptRules, getLoadBalancerIPTRules(svc, port, gatewayIP, port.NodePort)...)
-				iptRules = append(iptRules, getNodePortIPTRules(port, nil, gatewayIP, port.NodePort)...)
-				if config.Gateway.Mode == config.GatewayModeHybrid {
-					iptRules = append(iptRules, getHybridNodePortIPTRules(port, npw.nodeIP, svc.Spec.ClusterIP)...)
-				}
+				iptRules = append(iptRules, getLoadBalancerIPTRules(svc, port, svc.Spec.ClusterIP, port.Port)...)
+				iptRules = append(iptRules, getNodePortIPTRules(port, nil, svc.Spec.ClusterIP, port.Port)...)
 				klog.V(5).Infof("Will delete iptables rule for NodePort and cloud load balancers: %v and "+
 					"protocol: %v", port.NodePort, port.Protocol)
 			}

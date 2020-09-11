@@ -185,11 +185,9 @@ func (n *OvnNode) initGateway(subnets []*net.IPNet, nodeAnnotator kube.Annotator
 	var prFn postWaitFunc
 	switch config.Gateway.Mode {
 	case config.GatewayModeLocal:
-		err = n.initLocalnetGateway(subnets, nodeAnnotator, gatewayIntf)
+		prFn, err = n.initSharedGateway(subnets, gatewayNextHops, gatewayIntf, nodeAnnotator)
 	case config.GatewayModeShared:
 		prFn, err = n.initSharedGateway(subnets, gatewayNextHops, gatewayIntf, nodeAnnotator)
-	case config.GatewayModeHybrid:
-		prFn, err = n.initHybridGateway(subnets, gatewayIntf, nodeAnnotator, gatewayIntf)
 	case config.GatewayModeDisabled:
 		err = util.SetL3GatewayConfig(nodeAnnotator, &util.L3GatewayConfig{
 			Mode: config.GatewayModeDisabled,
@@ -216,17 +214,8 @@ func CleanupClusterNode(name string) error {
 	var err error
 
 	klog.V(5).Infof("Cleaning up gateway resources on node: %q", name)
-	switch config.Gateway.Mode {
-	case config.GatewayModeLocal:
-		err = cleanupLocalnetGateway(util.PhysicalNetworkName)
-	case config.GatewayModeShared:
+	if config.Gateway.Mode == config.GatewayModeLocal || config.Gateway.Mode == config.GatewayModeShared {
 		err = cleanupLocalnetGateway(util.LocalNetworkName)
-		if err != nil {
-			klog.Errorf("Failed to cleanup Localnet Gateway, error: %v", err)
-		}
-		err = cleanupSharedGateway()
-	case config.GatewayModeHybrid:
-		err = cleanupLocalnetGateway(util.PhysicalNetworkName)
 		if err != nil {
 			klog.Errorf("Failed to cleanup Localnet Gateway, error: %v", err)
 		}

@@ -345,7 +345,7 @@ type emptyLBBackendEvent struct {
 }
 
 func newModeEgressIP() modeEgressIP {
-	if config.Gateway.Mode == config.GatewayModeLocal || config.Gateway.Mode == config.GatewayModeHybrid {
+	if config.Gateway.Mode == config.GatewayModeLocal {
 		return &egressIPLocal{}
 	}
 	return &egressIPShared{}
@@ -877,13 +877,10 @@ func (oc *Controller) WatchNamespaces() {
 }
 
 func (oc *Controller) syncNodeGateway(node *kapi.Node, hostSubnets []*net.IPNet) error {
-	var l3GatewayConfig, hybridGatewayConfig *util.L3GatewayConfig
+	var l3GatewayConfig *util.L3GatewayConfig
 	var err error
-	if config.Gateway.Mode == config.GatewayModeHybrid {
-		l3GatewayConfig, hybridGatewayConfig, err = util.ParseNodeL3HybridGatewayAnnotation(node)
-	} else {
-		l3GatewayConfig, err = util.ParseNodeL3GatewayAnnotation(node)
-	}
+
+	l3GatewayConfig, err = util.ParseNodeL3GatewayAnnotation(node)
 	if err != nil {
 		return err
 	}
@@ -896,7 +893,7 @@ func (oc *Controller) syncNodeGateway(node *kapi.Node, hostSubnets []*net.IPNet)
 			return fmt.Errorf("error cleaning up gateway for node %s: %v", node.Name, err)
 		}
 	} else if hostSubnets != nil {
-		if err := oc.syncGatewayLogicalNetwork(node, l3GatewayConfig, hybridGatewayConfig, hostSubnets); err != nil {
+		if err := oc.syncGatewayLogicalNetwork(node, l3GatewayConfig, hostSubnets); err != nil {
 			return fmt.Errorf("error creating gateway for node %s: %v", node.Name, err)
 		}
 	}
