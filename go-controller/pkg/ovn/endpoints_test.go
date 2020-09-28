@@ -94,6 +94,7 @@ func (e endpoints) addCmds(fexec *ovntest.FakeExec, service v1.Service, endpoint
 	})
 	fexec.AddFakeCmdsNoOutputNoError([]string{
 		fmt.Sprintf("ovn-nbctl --timeout=15 set load_balancer %s vips:\"%s:%v\"=\"%s:%v\"", k8sTCPLoadBalancerIP, service.Spec.ClusterIP, service.Spec.Ports[0].Port, endpoint.Subsets[0].Addresses[0].IP, endpoint.Subsets[0].Ports[0].Port),
+		fmt.Sprintf("ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find acl name=%s-%s\\:%v", k8sTCPLoadBalancerIP, service.Spec.ClusterIP, service.Spec.Ports[0].Port),
 	})
 }
 

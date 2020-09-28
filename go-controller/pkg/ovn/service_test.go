@@ -51,6 +51,7 @@ func (s service) baseCmds(fexec *ovntest.FakeExec, service v1.Service) {
 	})
 	fexec.AddFakeCmdsNoOutputNoError([]string{
 		fmt.Sprintf("ovn-nbctl --timeout=15 --if-exists remove load_balancer %s vips \"172.30.0.10:53\"", k8sTCPLoadBalancerIP),
+		fmt.Sprintf("ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find acl name=%s-172.30.0.10\\:53", k8sTCPLoadBalancerIP),
 	})
 	fexec.AddFakeCmd(&ovntest.ExpectedCmd{
 		Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find load_balancer external_ids:k8s-cluster-lb-udp=yes",
@@ -62,6 +63,7 @@ func (s service) baseCmds(fexec *ovntest.FakeExec, service v1.Service) {
 	})
 	fexec.AddFakeCmdsNoOutputNoError([]string{
 		fmt.Sprintf("ovn-nbctl --timeout=15 --if-exists remove load_balancer %s vips \"172.30.0.10:53\"", k8sUDPLoadBalancerIP),
+		fmt.Sprintf("ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find acl name=%s-172.30.0.10\\:53", k8sUDPLoadBalancerIP),
 	})
 	fexec.AddFakeCmd(&ovntest.ExpectedCmd{
 		Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find load_balancer external_ids:k8s-cluster-lb-sctp=yes",
@@ -73,6 +75,7 @@ func (s service) baseCmds(fexec *ovntest.FakeExec, service v1.Service) {
 	})
 	fexec.AddFakeCmdsNoOutputNoError([]string{
 		fmt.Sprintf("ovn-nbctl --timeout=15 --if-exists remove load_balancer %s vips \"172.30.0.10:53\"", k8sSCTPLoadBalancerIP),
+		fmt.Sprintf("ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find acl name=%s-172.30.0.10\\:53", k8sSCTPLoadBalancerIP),
 	})
 	fexec.AddFakeCmd(&ovntest.ExpectedCmd{
 		Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_router options:chassis!=null",
@@ -88,6 +91,7 @@ func (s service) baseCmds(fexec *ovntest.FakeExec, service v1.Service) {
 	})
 	fexec.AddFakeCmdsNoOutputNoError([]string{
 		"ovn-nbctl --timeout=15 --if-exists remove load_balancer tcp_load_balancer_id_1 vips \"172.30.0.10:53\"",
+		"ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find acl name=tcp_load_balancer_id_1-172.30.0.10\\:53",
 	})
 	fexec.AddFakeCmd(&ovntest.ExpectedCmd{
 		Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find load_balancer external_ids:UDP_lb_gateway_router=gateway1",
@@ -99,6 +103,7 @@ func (s service) baseCmds(fexec *ovntest.FakeExec, service v1.Service) {
 	})
 	fexec.AddFakeCmdsNoOutputNoError([]string{
 		"ovn-nbctl --timeout=15 --if-exists remove load_balancer udp_load_balancer_id_1 vips \"172.30.0.10:53\"",
+		"ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find acl name=udp_load_balancer_id_1-172.30.0.10\\:53",
 	})
 	fexec.AddFakeCmd(&ovntest.ExpectedCmd{
 		Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find load_balancer external_ids:SCTP_lb_gateway_router=gateway1",
@@ -110,6 +115,7 @@ func (s service) baseCmds(fexec *ovntest.FakeExec, service v1.Service) {
 	})
 	fexec.AddFakeCmdsNoOutputNoError([]string{
 		"ovn-nbctl --timeout=15 --if-exists remove load_balancer sctp_load_balancer_id_1 vips \"172.30.0.10:53\"",
+		"ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find acl name=sctp_load_balancer_id_1-172.30.0.10\\:53",
 	})
 	fexec.AddFakeCmdsNoOutputNoError([]string{
 		fmt.Sprintf("ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find logical_switch load_balancer{>=}k8s_tcp_load_balancer"),
@@ -125,6 +131,7 @@ func (s service) delCmds(fexec *ovntest.FakeExec, service v1.Service) {
 	for _, port := range service.Spec.Ports {
 		fexec.AddFakeCmdsNoOutputNoError([]string{
 			fmt.Sprintf("ovn-nbctl --timeout=15 --if-exists remove load_balancer %s vips \"%s:%v\"", k8sTCPLoadBalancerIP, service.Spec.ClusterIP, port.Port),
+			fmt.Sprintf("ovn-nbctl --timeout=15 --data=bare --no-heading --columns=_uuid find acl name=%s-%s\\:%v", k8sTCPLoadBalancerIP, service.Spec.ClusterIP, port.Port),
 		})
 	}
 }
