@@ -19,11 +19,12 @@ import (
 )
 
 const (
-	v4localnetGatewayIP = "169.254.33.2"
-
 	// localnetGatewayNextHopPort is the name of the gateway port on the host to which all
 	// the packets leaving the OVN logical topology will be forwarded
 	localnetGatewayNextHopPort = "ovn-k8s-gw0"
+
+	// localGwModeNextHopPort is the next hop for traffic in routed by the kernel to OVN
+	localGwModeNextHopPort = "ovn-k8s-mp0"
 
 	// Routing table for ExternalIP communication
 	localnetGatewayExternalIDTable = "6"
@@ -137,8 +138,8 @@ func (npw *localPortWatcherData) addService(svc *kapi.Service) error {
 				klog.V(5).Infof("ExternalIP: %s is reachable through one of the interfaces on this node, will skip setup", externalIP)
 			} else {
 				if gatewayIP != "" {
-					if stdout, stderr, err := util.RunIP("route", "replace", externalIP, "via", gatewayIP, "dev", localnetGatewayNextHopPort, "table", localnetGatewayExternalIDTable); err != nil {
-						klog.Errorf("Error adding routing table entry for ExternalIP %s: stdout: %s, stderr: %s, err: %v", externalIP, stdout, stderr, err)
+					if stdout, stderr, err := util.RunIP("route", "replace", externalIP, "via", gatewayIP, "dev", localGwModeNextHopPort, "table", localnetGatewayExternalIDTable); err != nil {
+						klog.Errorf("Error adding routing table entry for ExternalIP %s, via gw: %s: stdout: %s, stderr: %s, err: %v", externalIP, gatewayIP, stdout, stderr, err)
 					} else {
 						klog.V(5).Infof("Successfully added route for ExternalIP: %s", externalIP)
 					}
@@ -183,7 +184,7 @@ func (npw *localPortWatcherData) deleteService(svc *kapi.Service) error {
 				klog.V(5).Infof("ExternalIP: %s is reachable through one of the interfaces on this node, will skip cleanup", externalIP)
 			} else {
 				if gatewayIP != "" {
-					if stdout, stderr, err := util.RunIP("route", "del", externalIP, "via", gatewayIP, "dev", localnetGatewayNextHopPort, "table", localnetGatewayExternalIDTable); err != nil {
+					if stdout, stderr, err := util.RunIP("route", "del", externalIP, "via", gatewayIP, "dev", localGwModeNextHopPort, "table", localnetGatewayExternalIDTable); err != nil {
 						klog.Errorf("Error delete routing table entry for ExternalIP %s: stdout: %s, stderr: %s, err: %v", externalIP, stdout, stderr, err)
 					} else {
 						klog.V(5).Infof("Successfully deleted route for ExternalIP: %s", externalIP)
