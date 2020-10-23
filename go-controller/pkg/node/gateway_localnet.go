@@ -4,6 +4,7 @@ package node
 
 import (
 	"fmt"
+	"github.com/vishvananda/netlink"
 	"net"
 	"reflect"
 	"strings"
@@ -27,7 +28,7 @@ const (
 	localGwModeNextHopPort = "ovn-k8s-mp0"
 
 	// Routing table for ExternalIP communication
-	localnetGatewayExternalIDTable = "6"
+	localnetGatewayExternalIDTable = 6
 )
 
 func getGatewayFamilyAddrs(gatewayIfAddrs []*net.IPNet) (string, string) {
@@ -89,8 +90,10 @@ func (npw *localPortWatcherData) addService(svc *kapi.Service) error {
 	iptRules := []iptRule{}
 	isIPv6Service := utilnet.IsIPv6String(svc.Spec.ClusterIP)
 	gatewayIP := npw.gatewayIPv4
+	fullMask := 32
 	if isIPv6Service {
 		gatewayIP = npw.gatewayIPv6
+		fullMask = 128
 	}
 	// holds map of external ips and if they are currently using routes
 	routeUsage := make(map[string]bool)
@@ -148,9 +151,27 @@ func (npw *localPortWatcherData) addService(svc *kapi.Service) error {
 			}
 		}
 	}
-	for externalIP, _ := range routeUsage {
-		if stdout, stderr, err := util.RunIP("route", "replace", externalIP, "via", gatewayIP, "dev", localGwModeNextHopPort, "table", localnetGatewayExternalIDTable); err != nil {
-			klog.Errorf("Error adding routing table entry for ExternalIP %s, via gw: %s: stdout: %s, stderr: %s, err: %v", externalIP, gatewayIP, stdout, stderr, err)
+	for externalIP := range routeUsage {
+		gwIP := net.ParseIP(gatewayIP)
+		if gwIP == nil {
+			klog.Warningf("Skipping route for external IP: %s, invalid gateway IP format: %s",
+				externalIP, gatewayIP)
+			continue
+		}
+		_, extSubnet, err := net.ParseCIDR(fmt.Sprintf("%s/%d", externalIP, fullMask))
+		if err != nil {
+			klog.Warningf("Skipping route for external IP, invalid external IP format: %s/%d, error: %v",
+				externalIP, fullMask, err)
+			continue
+		}
+		devLink, err := util.GetNetLinkOps().LinkByName(localGwModeNextHopPort)
+		if err != nil {
+			klog.Warningf("Skipping route for external IP: %s, error finding device: %s, error: %v",
+				externalIP, localGwModeNextHopPort, err)
+		}
+		if err := util.LinkRoutesReplace(devLink, gwIP, []*net.IPNet{extSubnet}, localnetGatewayExternalIDTable); err != nil {
+			klog.Errorf("Error adding routing table entry for ExternalIP %s, via gw: %s, err: %v", externalIP,
+				gatewayIP, err)
 		} else {
 			klog.V(5).Infof("Successfully added route for ExternalIP: %s", externalIP)
 		}
@@ -163,8 +184,10 @@ func (npw *localPortWatcherData) deleteService(svc *kapi.Service) error {
 	iptRules := []iptRule{}
 	isIPv6Service := utilnet.IsIPv6String(svc.Spec.ClusterIP)
 	gatewayIP := npw.gatewayIPv4
+	fullMask := 32
 	if isIPv6Service {
 		gatewayIP = npw.gatewayIPv6
+		fullMask = 128
 	}
 	// holds map of external ips and if they are currently using routes
 	routeUsage := make(map[string]bool)
@@ -197,9 +220,26 @@ func (npw *localPortWatcherData) deleteService(svc *kapi.Service) error {
 		}
 	}
 
-	for externalIP, _ := range routeUsage {
-		if stdout, stderr, err := util.RunIP("route", "del", externalIP, "via", gatewayIP, "dev", localGwModeNextHopPort, "table", localnetGatewayExternalIDTable); err != nil {
-			klog.Errorf("Error delete routing table entry for ExternalIP %s: stdout: %s, stderr: %s, err: %v", externalIP, stdout, stderr, err)
+	for externalIP := range routeUsage {
+		gwIP := net.ParseIP(gatewayIP)
+		if gwIP == nil {
+			klog.Warningf("Skipping route for external IP: %s, invalid gateway IP format: %s",
+				externalIP, gatewayIP)
+			continue
+		}
+		_, extSubnet, err := net.ParseCIDR(fmt.Sprintf("%s/%d", externalIP, fullMask))
+		if err != nil {
+			klog.Warningf("Skipping route for external IP, invalid external IP format: %s/%d, error: %v",
+				externalIP, fullMask, err)
+			continue
+		}
+		devLink, err := util.GetNetLinkOps().LinkByName(localGwModeNextHopPort)
+		if err != nil {
+			klog.Warningf("Skipping route for external IP: %s, error finding device: %s, error: %v",
+				externalIP, localGwModeNextHopPort, err)
+		}
+		if err := util.LinkRouteDel(devLink, gwIP, extSubnet, localnetGatewayExternalIDTable); err != nil {
+			klog.Errorf("Error delete routing table entry for ExternalIP %s: err: %v", externalIP, err)
 		} else {
 			klog.V(5).Infof("Successfully deleted route for ExternalIP: %s", externalIP)
 		}
@@ -210,24 +250,26 @@ func (npw *localPortWatcherData) deleteService(svc *kapi.Service) error {
 }
 
 func (npw *localPortWatcherData) syncServices(serviceInterface []interface{}) {
+	// keepRoutes is really a list of external IPs that currently exist
 	removeStaleRoutes := func(keepRoutes []string) {
-		stdout, stderr, err := util.RunIP("route", "list", "table", localnetGatewayExternalIDTable)
-		if err != nil || stdout == "" {
-			klog.Infof("No routing table entries for ExternalIP table %s: stdout: %s, stderr: %s, err: %v", localnetGatewayExternalIDTable, stdout, stderr, err)
+		routes, err := util.GetRoutesByTable(localnetGatewayExternalIDTable)
+		if err != nil {
+			klog.Errorf("Error during sync services. Failed to get routes for table: %d",
+				localnetGatewayExternalIDTable)
 			return
 		}
-		for _, existingRoute := range strings.Split(stdout, "\n") {
+		for _, existingRoute := range routes {
 			isFound := false
 			for _, keepRoute := range keepRoutes {
-				if strings.Contains(existingRoute, keepRoute) {
+				if strings.Contains(existingRoute.Dst.IP.String(), keepRoute) {
 					isFound = true
 					break
 				}
 			}
 			if !isFound {
-				klog.V(5).Infof("Deleting stale routing rule: %s", existingRoute)
-				if _, stderr, err := util.RunIP("route", "del", existingRoute, "table", localnetGatewayExternalIDTable); err != nil {
-					klog.Errorf("Error deleting stale routing rule: stderr: %s, err: %v", stderr, err)
+				klog.Infof("Deleting stale routing rule: %s", existingRoute)
+				if err := util.GetNetLinkOps().RouteDel(&existingRoute); err != nil {
+					klog.Errorf("Error deleting stale routing rule: %s, err: %v", existingRoute, err)
 				}
 			}
 		}
@@ -257,15 +299,17 @@ func (npw *localPortWatcherData) syncServices(serviceInterface []interface{}) {
 }
 
 func initRoutingRules() error {
-	stdout, stderr, err := util.RunIP("rule")
-	if err != nil {
-		return fmt.Errorf("error listing routing rules, stdout: %s, stderr: %s, err: %v", stdout, stderr, err)
-	}
-	if !strings.Contains(stdout, fmt.Sprintf("from all lookup %s", localnetGatewayExternalIDTable)) {
-		if stdout, stderr, err := util.RunIP("rule", "add", "from", "all", "table", localnetGatewayExternalIDTable); err != nil {
-			return fmt.Errorf("error adding routing rule for ExternalIP table (%s): stdout: %s, stderr: %s, err: %v", localnetGatewayExternalIDTable, stdout, stderr, err)
+	for _, ipFamily := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
+		rule := netlink.Rule{
+			Family: ipFamily,
+			Table:  localnetGatewayExternalIDTable,
+		}
+		err := util.EnsureRule(rule)
+		if err != nil {
+			return fmt.Errorf("unable to init routing rules for route: %s, err: %v", rule, err)
 		}
 	}
+
 	return nil
 }
 

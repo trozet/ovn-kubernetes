@@ -106,12 +106,6 @@ var _ = Describe("Node Operations", func() {
 					Cmd: "ip rule",
 					Output: "0:	from all lookup local\n32766:	from all lookup main\n32767:	from all lookup default\n",
 				})
-				fakeOvnNode.fakeExec.AddFakeCmdsNoOutputNoError([]string{
-					"ip rule add from all table " + localnetGatewayExternalIDTable,
-				})
-				fakeOvnNode.fakeExec.AddFakeCmdsNoOutputNoError([]string{
-					"ip route list table " + localnetGatewayExternalIDTable,
-				})
 
 				fakeOvnNode.start(ctx)
 				fakeOvnNode.node.watchLocalPorts(fNPW)
@@ -171,18 +165,14 @@ var _ = Describe("Node Operations", func() {
 					Cmd: "ip rule",
 					Output: "0:	from all lookup local\n32766:	from all lookup main\n32767:	from all lookup default\n",
 				})
+
 				fakeOvnNode.fakeExec.AddFakeCmdsNoOutputNoError([]string{
-					"ip rule add from all table " + localnetGatewayExternalIDTable,
-				})
-				fakeOvnNode.fakeExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd:    "ip route list table " + localnetGatewayExternalIDTable,
-					Output: fmt.Sprintf("%s via %s dev %s\n9.9.9.9 via %s dev %s\n", externalIP, v4localnetGatewayIP, localGwModeNextHopPort, v4localnetGatewayIP, localGwModeNextHopPort),
+					fmt.Sprintf("ip route del 9.9.9.9 via %s dev %s table %d",
+						v4localnetGatewayIP, localGwModeNextHopPort, localnetGatewayExternalIDTable),
 				})
 				fakeOvnNode.fakeExec.AddFakeCmdsNoOutputNoError([]string{
-					fmt.Sprintf("ip route del 9.9.9.9 via %s dev %s table %s", v4localnetGatewayIP, localGwModeNextHopPort, localnetGatewayExternalIDTable),
-				})
-				fakeOvnNode.fakeExec.AddFakeCmdsNoOutputNoError([]string{
-					fmt.Sprintf("ip route replace %s via %s dev %s table %s", externalIP, v4localnetGatewayIP, localGwModeNextHopPort, localnetGatewayExternalIDTable),
+					fmt.Sprintf("ip route replace %s via %s dev %s table %d", externalIP, v4localnetGatewayIP,
+						localGwModeNextHopPort, localnetGatewayExternalIDTable),
 				})
 
 				service := *newService("service1", "namespace1", "10.129.0.2",
@@ -299,7 +289,8 @@ var _ = Describe("Node Operations", func() {
 				)
 
 				fakeOvnNode.fakeExec.AddFakeCmdsNoOutputNoError([]string{
-					fmt.Sprintf("ip route replace %s via %s dev %s table %s", externalIP, v4localnetGatewayIP, localGwModeNextHopPort, localnetGatewayExternalIDTable),
+					fmt.Sprintf("ip route replace %s via %s dev %s table %d",
+						externalIP, v4localnetGatewayIP, localGwModeNextHopPort, localnetGatewayExternalIDTable),
 				})
 
 				fNPW.addService(&service)
@@ -519,7 +510,8 @@ var _ = Describe("Node Operations", func() {
 				)
 
 				fakeOvnNode.fakeExec.AddFakeCmdsNoOutputNoError([]string{
-					fmt.Sprintf("ip route del %s via %s dev %s table %s", externalIP, v4localnetGatewayIP, localGwModeNextHopPort, localnetGatewayExternalIDTable),
+					fmt.Sprintf("ip route del %s via %s dev %s table %d", externalIP, v4localnetGatewayIP,
+						localGwModeNextHopPort, localnetGatewayExternalIDTable),
 				})
 
 				fNPW.deleteService(&service)

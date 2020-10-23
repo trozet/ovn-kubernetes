@@ -31,10 +31,13 @@ type NetLinkOps interface {
 	RouteList(link netlink.Link, family int) ([]netlink.Route, error)
 	RouteDel(route *netlink.Route) error
 	RouteAdd(route *netlink.Route) error
+	RouteReplace(route *netlink.Route) error
 	RouteListFiltered(family int, filter *netlink.Route, filterMask uint64) ([]netlink.Route, error)
 	NeighAdd(neigh *netlink.Neigh) error
 	NeighList(linkIndex, family int) ([]netlink.Neigh, error)
 	ConntrackDeleteFilter(table netlink.ConntrackTableType, family netlink.InetFamily, filter netlink.CustomConntrackFilter) (uint, error)
+	RuleList(family int) ([]netlink.Rule, error)
+	RuleAdd(*netlink.Rule) error
 }
 
 type defaultNetLinkOps struct {
@@ -108,6 +111,10 @@ func (defaultNetLinkOps) RouteAdd(route *netlink.Route) error {
 	return netlink.RouteAdd(route)
 }
 
+func (defaultNetLinkOps) RouteReplace(route *netlink.Route) error {
+	return netlink.RouteReplace(route)
+}
+
 func (defaultNetLinkOps) RouteListFiltered(family int, filter *netlink.Route, filterMask uint64) ([]netlink.Route, error) {
 	return netlink.RouteListFiltered(family, filter, filterMask)
 }
@@ -122,6 +129,14 @@ func (defaultNetLinkOps) NeighList(linkIndex, family int) ([]netlink.Neigh, erro
 
 func (defaultNetLinkOps) ConntrackDeleteFilter(table netlink.ConntrackTableType, family netlink.InetFamily, filter netlink.CustomConntrackFilter) (uint, error) {
 	return netlink.ConntrackDeleteFilter(table, family, filter)
+}
+
+func (defaultNetLinkOps) RuleList(family int) ([]netlink.Rule, error) {
+	return netlink.RuleList(family)
+}
+
+func (defaultNetLinkOps) RuleAdd(rule *netlink.Rule) error {
+	return netlink.RuleAdd(rule)
 }
 
 func getFamily(ip net.IP) int {
@@ -210,6 +225,23 @@ func LinkRoutesDel(link netlink.Link, subnets []*net.IPNet) error {
 	return nil
 }
 
+// LinkRouteDel deletes a specific route for a given link in a table
+func LinkRouteDel(link netlink.Link, gwIP net.IP, subnet *net.IPNet, table int) error {
+	route := &netlink.Route{
+		Dst:       subnet,
+		LinkIndex: link.Attrs().Index,
+		Scope:     netlink.SCOPE_UNIVERSE,
+		Gw:        gwIP,
+		Table:     table,
+	}
+
+	err := netLinkOps.RouteDel(route)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // LinkRoutesAdd adds a new route for given subnets through the gwIPstr
 func LinkRoutesAdd(link netlink.Link, gwIP net.IP, subnets []*net.IPNet) error {
 	for _, subnet := range subnets {
@@ -229,6 +261,43 @@ func LinkRoutesAdd(link netlink.Link, gwIP net.IP, subnets []*net.IPNet) error {
 		}
 	}
 	return nil
+}
+
+// LinkRoutesReplace adds/replaces a new routes for given subnets through the gwIPstr
+func LinkRoutesReplace(link netlink.Link, gwIP net.IP, subnets []*net.IPNet, table int) error {
+	for _, subnet := range subnets {
+		route := &netlink.Route{
+			Dst:       subnet,
+			LinkIndex: link.Attrs().Index,
+			Scope:     netlink.SCOPE_UNIVERSE,
+			Gw:        gwIP,
+			Table:     table,
+		}
+		err := netLinkOps.RouteReplace(route)
+		if err != nil {
+			if os.IsExist(err) {
+				return err
+			}
+			return fmt.Errorf("failed to add/replace route for subnet %s via gateway %s: %v",
+				subnet.String(), gwIP.String(), err)
+		}
+	}
+	return nil
+}
+
+// GetRoutesByTable returns list of routes for a given table number
+func GetRoutesByTable(table int) ([]netlink.Route, error) {
+	routeFilter := &netlink.Route{Table: table}
+	filterMask := netlink.RT_FILTER_TABLE
+	var routes []netlink.Route
+	routes, err := netLinkOps.RouteListFiltered(netlink.FAMILY_ALL, routeFilter, filterMask)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return routes, nil
 }
 
 // LinkRouteExists checks for existence of routes for the given subnet through gwIPStr
@@ -347,4 +416,24 @@ func GetNetworkInterfaceIPs(iface string) ([]*net.IPNet, error) {
 		ips = append(ips, addr.IPNet)
 	}
 	return ips, nil
+}
+
+// EnsureRule ensures that a particular rule is configured
+func EnsureRule(rule netlink.Rule) error {
+	rules, err := netLinkOps.RuleList(rule.Family)
+	if err != nil {
+		return err
+	}
+	ruleFound := false
+	for _, foundRule := range rules {
+		if foundRule == rule {
+			ruleFound = true
+			break
+		}
+	}
+
+	if !ruleFound {
+		return netLinkOps.RuleAdd(&rule)
+	}
+	return nil
 }
