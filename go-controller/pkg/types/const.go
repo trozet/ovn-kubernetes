@@ -52,6 +52,11 @@ const (
 	V4NodeLocalNATSubnetNextHop    = "169.254.0.1"
 	V4NodeLocalDistributedGWPortIP = "169.254.0.2"
 
+	V4GatewayRouterIP = "169.254.1.1"
+	V6GatewayRouterIP = "fd98::1"
+	V4SharedBridgeIP  = "169.254.1.2"
+	V6SharedBridgeIP  = "fd98::2"
+
 	// OpenFlow and Networking constants
 	RouteAdvertisementICMPType    = 134
 	NeighborAdvertisementICMPType = 136

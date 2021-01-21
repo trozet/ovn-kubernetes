@@ -27,10 +27,28 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 
 	// Create a gateway router.
 	gatewayRouter := types.GWRouterPrefix + nodeName
-	physicalIPs := make([]string, len(l3GatewayConfig.IPAddresses))
-	for i, ip := range l3GatewayConfig.IPAddresses {
-		physicalIPs[i] = ip.IP.String()
+
+	var physicalIPs []string
+	var nextHops []net.IP
+	var gwMAC net.HardwareAddr
+	if config.Gateway.Mode == config.GatewayModeShared {
+		if config.IPv4Mode {
+			physicalIPs = append(physicalIPs, types.V4GatewayRouterIP)
+			nextHops = append(nextHops, net.ParseIP(types.V4SharedBridgeIP))
+		}
+		if config.IPv6Mode {
+			physicalIPs = append(physicalIPs, types.V6GatewayRouterIP)
+			nextHops = append(nextHops, net.ParseIP(types.V6SharedBridgeIP))
+		}
+		gwMAC = util.IPAddrToHWAddr(net.ParseIP(physicalIPs[0]))
+	} else {
+		physicalIPs = make([]string, len(l3GatewayConfig.IPAddresses))
+		for i, ip := range l3GatewayConfig.IPAddresses {
+			physicalIPs[i] = ip.IP.String()
+		}
+		gwMAC = l3GatewayConfig.MACAddress
 	}
+
 	stdout, stderr, err := util.RunOVNNbctl("--", "--may-exist", "lr-add",
 		gatewayRouter, "--", "set", "logical_router", gatewayRouter,
 		"options:chassis="+l3GatewayConfig.ChassisID,
@@ -229,10 +247,10 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 	cmdArgs = []string{
 		"--", "--if-exists", "lrp-del", types.GWRouterToExtSwitchPrefix + gatewayRouter,
 		"--", "lrp-add", gatewayRouter, types.GWRouterToExtSwitchPrefix + gatewayRouter,
-		l3GatewayConfig.MACAddress.String(),
+		gwMAC.String(),
 	}
-	for _, ip := range l3GatewayConfig.IPAddresses {
-		cmdArgs = append(cmdArgs, ip.String())
+	for _, ip := range physicalIPs {
+		cmdArgs = append(cmdArgs, ip)
 	}
 	cmdArgs = append(cmdArgs,
 		"--", "set", "logical_router_port", types.GWRouterToExtSwitchPrefix+gatewayRouter,
@@ -255,8 +273,12 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 			"stderr: %q, error: %v", gatewayRouter, stdout, stderr, err)
 	}
 
+	if config.Gateway.Mode != config.GatewayModeShared {
+		nextHops = l3GatewayConfig.NextHops
+	}
+
 	// Add static routes in GR with gateway router as the default next hop.
-	for _, nextHop := range l3GatewayConfig.NextHops {
+	for _, nextHop := range nextHops {
 		var allIPs string
 		if utilnet.IsIPv6(nextHop) {
 			allIPs = "::/0"
@@ -315,9 +337,9 @@ func gatewayInit(nodeName string, clusterIPSubnet []*net.IPNet, hostSubnets []*n
 	// gws or pod CNFs will be added within pods.go addLogicalPort
 	if !config.Gateway.DisableSNATMultipleGWs && config.Gateway.Mode != config.GatewayModeLocal {
 		// Default SNAT rules.
-		externalIPs := make([]net.IP, len(l3GatewayConfig.IPAddresses))
-		for i, ip := range l3GatewayConfig.IPAddresses {
-			externalIPs[i] = ip.IP
+		externalIPs := make([]net.IP, len(physicalIPs))
+		for i, ip := range physicalIPs {
+			externalIPs[i] = net.ParseIP(ip)
 		}
 		for _, entry := range clusterIPSubnet {
 			externalIP, err := util.MatchIPFamily(utilnet.IsIPv6CIDR(entry), externalIPs)
