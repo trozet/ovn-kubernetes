@@ -218,8 +218,23 @@ func gatewayInitInternal(nodeName, gwIntf string, subnets []*net.IPNet, gwNextHo
 		return bridgeName, uplinkName, nil, nil, fmt.Errorf("failed to set up shared interface gateway: %v", err)
 	}
 
+	// get the MTU from interface
+	link, err := util.LinkSetUp(gwIntf)
+	if err != nil {
+		return bridgeName, uplinkName, nil, nil, fmt.Errorf("failed to get MTU for gateway setup on "+
+			"interface: %s, error: %v", gwIntf, err)
+	}
+
+	// set MTU on mgmt iface
+	_, stderr, err := util.RunOVSVsctl("set", "interface", types.K8sMgmtIntfName,
+		"mtu_request="+fmt.Sprintf("%d", link.Attrs().MTU))
+	if err != nil {
+		return bridgeName, uplinkName, nil, nil, fmt.Errorf("failed to update MTU for mgmt port: %s, "+
+			"stderr: %q, error: %v", types.K8sMgmtIntfName, stderr, err)
+	}
+
 	if config.Gateway.Mode == config.GatewayModeLocal {
-		err = setupLocalNodeAccessBridge(nodeName, subnets)
+		err = setupLocalNodeAccessBridge(nodeName, subnets, link.Attrs().MTU)
 		if err != nil {
 			return bridgeName, uplinkName, nil, nil, err
 		}
@@ -238,6 +253,7 @@ func gatewayInitInternal(nodeName, gwIntf string, subnets []*net.IPNet, gwNextHo
 		NextHops:       gwNextHops,
 		NodePortEnable: config.Gateway.NodeportEnable,
 		VLANID:         &config.Gateway.VLANID,
+		MTU:            link.Attrs().MTU,
 	})
 	return bridgeName, uplinkName, macAddress, ips, err
 }

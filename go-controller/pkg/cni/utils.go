@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 )
@@ -71,9 +70,10 @@ func PodAnnotation2PodInfo(podAnnotation map[string]string, checkExtIDs bool, is
 	if err != nil {
 		return nil, err
 	}
+
 	podInterfaceInfo := &PodInterfaceInfo{
 		PodAnnotation: *podAnnotSt,
-		MTU:           config.Default.MTU,
+		MTU:           podAnnotSt.MTU,
 		Ingress:       ingress,
 		Egress:        egress,
 		CheckExtIDs:   checkExtIDs,

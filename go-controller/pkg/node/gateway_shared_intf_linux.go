@@ -20,7 +20,7 @@ import (
 // appropriate IP and MAC address on it. All the traffic from this node's hostNetwork
 // Pod towards cluster service ip whose backend is the node itself is forwarded to the
 // ovn-k8s-gw0 port after SNATing by the OVN's distributed gateway port.
-func setupLocalNodeAccessBridge(nodeName string, subnets []*net.IPNet) error {
+func setupLocalNodeAccessBridge(nodeName string, subnets []*net.IPNet, mtu int) error {
 	localBridgeName := types.LocalBridgeName
 	_, stderr, err := util.RunOVSVsctl("--may-exist", "add-br", localBridgeName)
 	if err != nil {
@@ -44,7 +44,7 @@ func setupLocalNodeAccessBridge(nodeName string, subnets []*net.IPNet) error {
 	_, stderr, err = util.RunOVSVsctl(
 		"--may-exist", "add-port", localBridgeName, localnetGatewayNextHopPort,
 		"--", "set", "interface", localnetGatewayNextHopPort, "type=internal",
-		"mtu_request="+fmt.Sprintf("%d", config.Default.MTU),
+		"mtu_request="+fmt.Sprintf("%d", mtu),
 		fmt.Sprintf("mac=%s", strings.ReplaceAll(macAddress, ":", "\\:")))
 	if err != nil {
 		return fmt.Errorf("failed to add the port %s to bridge %s, stderr:%s (%v)",

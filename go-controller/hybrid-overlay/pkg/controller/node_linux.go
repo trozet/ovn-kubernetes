@@ -305,9 +305,22 @@ func (n *NodeController) EnsureHybridOverlayBridge(node *kapi.Node) error {
 	hybridOverlayIfAddr := util.GetNodeHybridOverlayIfAddr(subnet)
 	n.drIP = hybridOverlayIfAddr.IP
 
+	// get MTU from L3Gateway
+	gwConf, err := util.ParseNodeL3GatewayAnnotation(node)
+	if err != nil {
+		klog.Infof("Node %s does not have L3 Gateway annotation yet, failed to ensure hybrid overlay"+
+			"and will retry later", n.nodeName)
+		return nil
+	}
+	if gwConf.MTU == 0 {
+		klog.Infof("Node %s does not have L3 Gateway annotation yet, failed to ensure hybrid overlay"+
+			"and will retry later", n.nodeName)
+		return nil
+	}
+
 	_, stderr, err := util.RunOVSVsctl("--may-exist", "add-br", extBridgeName,
 		"--", "set", "Bridge", extBridgeName, "fail_mode=secure",
-		"--", "set", "Interface", extBridgeName, "mtu_request="+fmt.Sprintf("%d", config.Default.MTU))
+		"--", "set", "Interface", extBridgeName, "mtu_request="+fmt.Sprintf("%d", gwConf.MTU))
 	if err != nil {
 		return fmt.Errorf("failed to create hybrid-overlay bridge %s"+
 			", stderr:%s: %v", extBridgeName, stderr, err)

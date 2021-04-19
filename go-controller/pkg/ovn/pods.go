@@ -173,25 +173,27 @@ func (oc *Controller) addRoutesGatewayIP(pod *kapi.Pod, podAnnotation *util.PodA
 		var gatewayIP net.IP
 		hasRoutingExternalGWs := len(oc.getRoutingExternalGWs(pod.Namespace).gws) > 0
 		hasPodRoutingGWs := len(oc.getRoutingPodGWs(pod.Namespace)) > 0
-		if otherDefaultRoute || (hasRoutingExternalGWs && hasPodRoutingGWs) {
-			for _, clusterSubnet := range config.Default.ClusterSubnets {
-				if isIPv6 == utilnet.IsIPv6CIDR(clusterSubnet.CIDR) {
-					podAnnotation.Routes = append(podAnnotation.Routes, util.PodRoute{
-						Dest:    clusterSubnet.CIDR,
-						NextHop: gatewayIPnet.IP,
-					})
-				}
-			}
-			for _, serviceSubnet := range config.Kubernetes.ServiceCIDRs {
-				if isIPv6 == utilnet.IsIPv6CIDR(serviceSubnet) {
-					podAnnotation.Routes = append(podAnnotation.Routes, util.PodRoute{
-						Dest:    serviceSubnet,
-						NextHop: gatewayIPnet.IP,
-					})
-				}
-			}
-		} else {
+		if !(otherDefaultRoute || (hasRoutingExternalGWs && hasPodRoutingGWs)) {
 			gatewayIP = gatewayIPnet.IP
+		}
+
+		for _, clusterSubnet := range config.Default.ClusterSubnets {
+			if isIPv6 == utilnet.IsIPv6CIDR(clusterSubnet.CIDR) {
+				podAnnotation.Routes = append(podAnnotation.Routes, util.PodRoute{
+					Dest:    clusterSubnet.CIDR,
+					NextHop: gatewayIPnet.IP,
+					MTU:     config.Default.MTU,
+				})
+			}
+		}
+		for _, serviceSubnet := range config.Kubernetes.ServiceCIDRs {
+			if isIPv6 == utilnet.IsIPv6CIDR(serviceSubnet) {
+				podAnnotation.Routes = append(podAnnotation.Routes, util.PodRoute{
+					Dest:    serviceSubnet,
+					NextHop: gatewayIPnet.IP,
+					MTU:     config.Default.MTU,
+				})
+			}
 		}
 
 		if len(config.HybridOverlay.ClusterSubnets) > 0 && !hasRoutingExternalGWs && !hasPodRoutingGWs {
@@ -203,6 +205,7 @@ func (oc *Controller) addRoutesGatewayIP(pod *kapi.Pod, podAnnotation *util.PodA
 					podAnnotation.Routes = append(podAnnotation.Routes, util.PodRoute{
 						Dest:    clusterSubnet.CIDR,
 						NextHop: nextHop,
+						MTU:     config.Default.MTU,
 					})
 				}
 			}
@@ -415,6 +418,23 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 			return fmt.Errorf("cannot retrieve subnet for assigning gateway routes for pod %s, node: %s",
 				pod.Name, logicalSwitch)
 		}
+		// get MTU via node's GW config
+		node, err := oc.watchFactory.GetNode(pod.Spec.NodeName)
+		if err != nil {
+			return fmt.Errorf("unable to retrieve node assigned for pod %s, node: %s, error: %v",
+				pod.Name, pod.Spec.NodeName, err)
+		}
+		l3Config, err := util.ParseNodeL3GatewayAnnotation(node)
+		if err != nil {
+			return fmt.Errorf("unable to read L3 gateway conf for pod %s, node: %s, error: %v",
+				pod.Name, pod.Spec.NodeName, err)
+		}
+		if l3Config.MTU == 0 {
+			return fmt.Errorf("invalid MTU detected for pod: %s, node: %s. Node may be waiting to be updated",
+				pod.Name, pod.Spec.NodeName)
+		}
+		podAnnotation.MTU = l3Config.MTU
+
 		err = oc.addRoutesGatewayIP(pod, &podAnnotation, nodeSubnets)
 		if err != nil {
 			return err

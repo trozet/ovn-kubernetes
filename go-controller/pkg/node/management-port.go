@@ -5,7 +5,6 @@ import (
 	"net"
 	"strings"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
@@ -31,7 +30,7 @@ func createManagementPort(nodeNameOriginal string, hostSubnets []*net.IPNet, nod
 		"--", "--if-exists", "del-port", "br-int", legacyMgmtIntfName,
 		"--", "--may-exist", "add-port", "br-int", types.K8sMgmtIntfName,
 		"--", "set", "interface", types.K8sMgmtIntfName,
-		"type=internal", "mtu_request="+fmt.Sprintf("%d", config.Default.MTU),
+		"type=internal",
 		"external-ids:iface-id="+types.K8sPrefix+nodeName)
 	if err != nil {
 		klog.Errorf("Failed to add port to br-int, stdout: %q, stderr: %q, error: %v", stdout, stderr, err)

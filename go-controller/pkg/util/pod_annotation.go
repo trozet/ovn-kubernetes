@@ -58,6 +58,8 @@ type PodAnnotation struct {
 	Gateways []net.IP
 	// Routes are additional routes to add to the pod's network namespace
 	Routes []PodRoute
+	// MTU is the current MTU set on the pod's interface
+	MTU int
 }
 
 // PodRoute describes any routes to be added to the pod's network namespace
@@ -66,6 +68,8 @@ type PodRoute struct {
 	Dest *net.IPNet
 	// NextHop is the IP address of the next hop for traffic destined for Dest
 	NextHop net.IP
+	// MTU is the MTU specified on a per route basis, a value of 0 indicates no MTU requested
+	MTU int
 }
 
 // Internal struct used to marshal PodAnnotation to the pod annotation
@@ -77,12 +81,14 @@ type podAnnotation struct {
 
 	IP      string `json:"ip_address,omitempty"`
 	Gateway string `json:"gateway_ip,omitempty"`
+	MTU     int    `json:"mtu,omitempty"`
 }
 
 // Internal struct used to marshal PodRoute to the pod annotation
 type podRoute struct {
 	Dest    string `json:"dest"`
 	NextHop string `json:"nextHop"`
+	MTU     int    `json:"mtu,omitempty"`
 }
 
 // MarshalPodAnnotation returns a JSON-formatted annotation describing the pod's
@@ -90,6 +96,7 @@ type podRoute struct {
 func MarshalPodAnnotation(podInfo *PodAnnotation) (map[string]string, error) {
 	pa := podAnnotation{
 		MAC: podInfo.MAC.String(),
+		MTU: podInfo.MTU,
 	}
 
 	if len(podInfo.IPs) == 1 {
@@ -118,6 +125,7 @@ func MarshalPodAnnotation(podInfo *PodAnnotation) (map[string]string, error) {
 		pa.Routes = append(pa.Routes, podRoute{
 			Dest:    r.Dest.String(),
 			NextHop: nh,
+			MTU:     r.MTU,
 		})
 	}
 
@@ -156,6 +164,8 @@ func UnmarshalPodAnnotation(annotations map[string]string) (*PodAnnotation, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse pod MAC %q: %v", a.MAC, err)
 	}
+
+	podAnnotation.MTU = a.MTU
 
 	if len(a.IPs) == 0 {
 		if a.IP == "" {
@@ -205,6 +215,10 @@ func UnmarshalPodAnnotation(annotations map[string]string) (*PodAnnotation, erro
 			} else if utilnet.IsIPv6(route.NextHop) != utilnet.IsIPv6CIDR(route.Dest) {
 				return nil, fmt.Errorf("pod route %s has next hop %s of different family", r.Dest, r.NextHop)
 			}
+		}
+		// mtu is optional on routes
+		if r.MTU > 0 {
+			route.MTU = r.MTU
 		}
 		podAnnotation.Routes = append(podAnnotation.Routes, route)
 	}

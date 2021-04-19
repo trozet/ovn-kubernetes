@@ -72,6 +72,7 @@ type L3GatewayConfig struct {
 	NextHops       []net.IP
 	NodePortEnable bool
 	VLANID         *uint
+	MTU            int
 }
 
 type l3GatewayConfigJSON struct {
@@ -84,6 +85,7 @@ type l3GatewayConfigJSON struct {
 	NextHop        string             `json:"next-hop,omitempty"`
 	NodePortEnable string             `json:"node-port-enable,omitempty"`
 	VLANID         string             `json:"vlan-id,omitempty"`
+	MTU            int                `json:"mtu,omitempty"`
 }
 
 func (cfg *L3GatewayConfig) MarshalJSON() ([]byte, error) {
@@ -115,6 +117,8 @@ func (cfg *L3GatewayConfig) MarshalJSON() ([]byte, error) {
 	if len(cfgjson.NextHops) == 1 {
 		cfgjson.NextHop = cfgjson.NextHops[0]
 	}
+
+	cfgjson.MTU = cfg.MTU
 
 	return json.Marshal(&cfgjson)
 }
@@ -185,6 +189,11 @@ func (cfg *L3GatewayConfig) UnmarshalJSON(bytes []byte) error {
 			}
 		}
 	}
+
+	if cfgjson.MTU < 68 {
+		return fmt.Errorf("invalid MTU value detected: %d", cfg.MTU)
+	}
+	cfg.MTU = cfgjson.MTU
 
 	return nil
 }
