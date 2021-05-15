@@ -229,6 +229,22 @@ func gatewayInitInternal(nodeName, gwIntf string, subnets []*net.IPNet, gwNextHo
 		return bridgeName, uplinkName, nil, nil, err
 	}
 
+	// connect OF controller
+	if config.Gateway.Mode == config.GatewayModeShared {
+		_, _, err := util.RunOVSVsctl("set-controller", bridgeName, "tcp:127.0.0.1:6653")
+		if err != nil {
+			return bridgeName, uplinkName, nil, nil, err
+		}
+		_, _, err = util.RunOVSVsctl("set", "controller", bridgeName, "connection-mode=out-of-band")
+		if err != nil {
+			return bridgeName, uplinkName, nil, nil, err
+		}
+		_, _, err = util.RunOVSVsctl("set", "bridge", bridgeName, "other-config:disable-in-band=true")
+		if err != nil {
+			return bridgeName, uplinkName, nil, nil, err
+		}
+	}
+
 	err = util.SetL3GatewayConfig(nodeAnnotator, &util.L3GatewayConfig{
 		Mode:           config.GatewayModeShared,
 		ChassisID:      chassisID,

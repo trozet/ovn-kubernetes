@@ -322,13 +322,15 @@ func newSharedGatewayOpenFlowManager(patchPort, macAddress, gwBridge, gwIntf str
 
 	if config.IPv4Mode {
 		// table 1, established and related connections in zone 64000 go to OVN
+		// check packet length larger than MTU + eth header - vlan overhead
+		// send to table 11 to check if it needs packet_in
 		dftFlows = append(dftFlows,
 			fmt.Sprintf("cookie=%s, priority=100, table=1, ip, ct_state=+trk+est, "+
-				"actions=output:%s", defaultOpenFlowCookie, ofportPatch))
+				"actions=check_pkt_larger(1412)->OXM_OF_PKT_REG4[0],resubmit(,11)", defaultOpenFlowCookie))
 
 		dftFlows = append(dftFlows,
 			fmt.Sprintf("cookie=%s, priority=100, table=1, ip, ct_state=+trk+rel, "+
-				"actions=output:%s", defaultOpenFlowCookie, ofportPatch))
+				"actions=check_pkt_larger(1412)->OXM_OF_PKT_REG4[0],resubmit(,11)", defaultOpenFlowCookie))
 	}
 
 	if config.IPv6Mode {
@@ -357,6 +359,15 @@ func newSharedGatewayOpenFlowManager(patchPort, macAddress, gwBridge, gwIntf str
 					defaultOpenFlowCookie, ipPrefix, ipPrefix, cidr, ofportPatch))
 		}
 	}
+
+	// New dispatch table to OVN, table 11
+	dftFlows = append(dftFlows,
+		fmt.Sprintf("cookie=%s, priority=10, table=11, reg9=0x1/0x1, "+
+			"actions=controller", defaultOpenFlowCookie))
+	// table 1, established and related connections in zone 64000 go to OVN
+	dftFlows = append(dftFlows,
+		fmt.Sprintf("cookie=%s, priority=1, table=11, "+
+			"actions=output:%s", defaultOpenFlowCookie, ofportPatch))
 
 	// table 1, we check to see if this dest mac is the shared mac, if so send to host
 	dftFlows = append(dftFlows,
@@ -438,6 +449,7 @@ func newSharedGatewayOpenFlowManager(patchPort, macAddress, gwBridge, gwIntf str
 		flowCache:   make(map[string][]string),
 		flowMutex:   sync.Mutex{},
 		flowChan:    make(chan struct{}, 1),
+		controller:  NewSampleController(),
 	}
 
 	ofm.updateFlowCacheEntry("NORMAL", []string{fmt.Sprintf("table=0,priority=0,actions=%s\n", util.NormalAction)})

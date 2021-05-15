@@ -132,7 +132,8 @@ type openflowManager struct {
 	flowCache map[string][]string
 	flowMutex sync.Mutex
 	// channel to indicate we need to update flows immediately
-	flowChan chan struct{}
+	flowChan   chan struct{}
+	controller *SampleController
 }
 
 func (c *openflowManager) updateFlowCacheEntry(key string, flows []string) {
@@ -174,6 +175,8 @@ func (c *openflowManager) syncFlows() {
 // checkDefaultOpenFlow checks for the existence of default OpenFlow rules and
 // exits if the output is not as expected
 func (c *openflowManager) Run(stopChan <-chan struct{}) {
+	// start OF controller
+	c.controller.Start()
 	for {
 		select {
 		case <-time.After(15 * time.Second):

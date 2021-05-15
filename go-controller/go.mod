@@ -3,6 +3,7 @@ module github.com/ovn-org/ovn-kubernetes/go-controller
 go 1.13
 
 require (
+	github.com/Kmotiko/gofc v0.0.0-20190902011257-857358e251a4
 	github.com/Mellanox/sriovnet v1.0.2
 	github.com/Microsoft/go-winio v0.4.15 // indirect
 	github.com/Microsoft/hcsshim v0.8.10-0.20200715222032-5eafd1556990
@@ -14,6 +15,7 @@ require (
 	github.com/ebay/go-ovn v0.1.1-0.20210505151822-f0122836cc35
 	github.com/ebay/libovsdb v0.2.1-0.20200719163122-3332afaeb27c
 	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/google/gopacket v1.1.19
 	github.com/gorilla/mux v1.8.0
 	github.com/hashicorp/golang-lru v0.5.3 // indirect
 	github.com/imdario/mergo v0.3.8 // indirect
@@ -29,7 +31,8 @@ require (
 	github.com/stretchr/testify v1.6.1
 	github.com/urfave/cli/v2 v2.2.0
 	github.com/vishvananda/netlink v1.1.1-0.20201029203352-d40f9887b852
-	golang.org/x/sys v0.0.0-20210112080510-489259a85091
+	golang.org/x/net v0.0.0-20210510120150-4163338589ed
+	golang.org/x/sys v0.0.0-20210423082822-04245dca01da
 	gopkg.in/fsnotify/fsnotify.v1 v1.4.7
 	gopkg.in/gcfg.v1 v1.2.3
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0
