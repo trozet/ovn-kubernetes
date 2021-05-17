@@ -42,6 +42,7 @@ func (c *SampleController) HandlePacketIn(msg *ofp13.OfpPacketIn, dp *gofc.Datap
 	ethLayer := packet.Layer(layers.LayerTypeEthernet)
 	if ethLayer == nil {
 		klog.Errorf("TROZET: unable to parse ethernet: %v", packet)
+		return
 	}
 
 	ethHeader := ethLayer.(*layers.Ethernet)
@@ -50,7 +51,8 @@ func (c *SampleController) HandlePacketIn(msg *ofp13.OfpPacketIn, dp *gofc.Datap
 	// ipLayer
 	ipLayer := packet.Layer(layers.LayerTypeIPv4)
 	if ipLayer == nil {
-		klog.Errorf("TROZET: unknown next layer type: %v", packet.NetworkLayer())
+		klog.Errorf("TROZET: unknown next layer type: %v, mac src: %s", packet.NetworkLayer(), ethHeader.SrcMAC)
+		return
 	}
 
 	ipHeader := ipLayer.(*layers.IPv4)
@@ -101,6 +103,7 @@ func (c *SampleController) HandlePacketIn(msg *ofp13.OfpPacketIn, dp *gofc.Datap
 		packetOut := ofp13.NewOfpPacketOut(msg.BufferId, ofp13.OFPP_CONTROLLER,
 			[]ofp13.OfpAction{ofp13.NewOfpActionOutput(outPort, 1500)},
 			buf.Bytes())
+		klog.Info("TROZET: sending frag needed to %s, via port: %d", ipData.DstIP, outPort)
 		dp.Send(packetOut)
 	}
 }

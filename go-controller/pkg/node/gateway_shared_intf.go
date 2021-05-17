@@ -326,11 +326,11 @@ func newSharedGatewayOpenFlowManager(patchPort, macAddress, gwBridge, gwIntf str
 		// send to table 11 to check if it needs packet_in
 		dftFlows = append(dftFlows,
 			fmt.Sprintf("cookie=%s, priority=100, table=1, ip, ct_state=+trk+est, "+
-				"actions=check_pkt_larger(1412)->OXM_OF_PKT_REG4[0],resubmit(,11)", defaultOpenFlowCookie))
+				"actions=check_pkt_larger(1412)->reg0[0],resubmit(,11)", defaultOpenFlowCookie))
 
 		dftFlows = append(dftFlows,
 			fmt.Sprintf("cookie=%s, priority=100, table=1, ip, ct_state=+trk+rel, "+
-				"actions=check_pkt_larger(1412)->OXM_OF_PKT_REG4[0],resubmit(,11)", defaultOpenFlowCookie))
+				"actions=check_pkt_larger(1412)->reg0[0],resubmit(,11)", defaultOpenFlowCookie))
 	}
 
 	if config.IPv6Mode {
@@ -355,14 +355,15 @@ func newSharedGatewayOpenFlowManager(patchPort, macAddress, gwBridge, gwIntf str
 				ipPrefix = "ip"
 			}
 			dftFlows = append(dftFlows,
-				fmt.Sprintf("cookie=%s, priority=15, table=1, %s, %s_dst=%s, actions=output:%s",
-					defaultOpenFlowCookie, ipPrefix, ipPrefix, cidr, ofportPatch))
+				fmt.Sprintf("cookie=%s, priority=15, table=1, %s, %s_dst=%s, " +
+					"actions=check_pkt_larger(1412)->reg0[0],resubmit(,11)",
+					defaultOpenFlowCookie, ipPrefix, ipPrefix, cidr))
 		}
 	}
 
 	// New dispatch table to OVN, table 11
 	dftFlows = append(dftFlows,
-		fmt.Sprintf("cookie=%s, priority=10, table=11, reg9=0x1/0x1, "+
+		fmt.Sprintf("cookie=%s, priority=10, table=11, reg0=0x1/0x1, "+
 			"actions=controller", defaultOpenFlowCookie))
 	// table 1, established and related connections in zone 64000 go to OVN
 	dftFlows = append(dftFlows,

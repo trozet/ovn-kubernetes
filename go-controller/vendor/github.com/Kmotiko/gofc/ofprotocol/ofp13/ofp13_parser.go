@@ -1375,6 +1375,9 @@ func (m *OfpMatch) Parse(packet []byte) {
 
 	for index < (int(m.Length) - 4) {
 		mf := parseOxmField(packet[index:])
+		if mf == nil {
+			continue
+		}
 		m.OxmFields = append(m.OxmFields, mf)
 		index += mf.Size()
 	}
