@@ -4,7 +4,6 @@ import (
 	"sync"
 
 	goovn "github.com/ebay/go-ovn"
-	"github.com/onsi/gomega"
 	libovsdbclient "github.com/ovn-org/libovsdb/client"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
@@ -54,8 +53,7 @@ type FakeOVN struct {
 }
 
 func NewFakeOVN(fexec *ovntest.FakeExec) *FakeOVN {
-	err := util.SetExec(fexec)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	util.SetExec(fexec)
 	return &FakeOVN{
 		fakeExec:     fexec,
 		asf:          addressset.NewFakeAddressSetFactory(),
@@ -77,8 +75,7 @@ func (o *FakeOVN) start(ctx *cli.Context, objects ...runtime.Object) {
 			v1Objects = append(v1Objects, object)
 		}
 	}
-	_, err := config.InitConfig(ctx, o.fakeExec, nil)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	config.InitConfig(ctx, o.fakeExec, nil)
 	o.fakeClient = &util.OVNClientset{
 		KubeClient:           fake.NewSimpleClientset(v1Objects...),
 		EgressIPClient:       egressipfake.NewSimpleClientset(egressIPObjects...),
@@ -100,22 +97,17 @@ func (o *FakeOVN) restart() {
 func (o *FakeOVN) shutdown() {
 	close(o.stopChan)
 	o.watcher.Shutdown()
-	err := o.controller.ovnNBClient.Close()
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	err = o.controller.ovnSBClient.Close()
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	o.controller.ovnNBClient.Close()
+	o.controller.ovnSBClient.Close()
 	o.wg.Wait()
 }
 
 func (o *FakeOVN) init() {
-	var err error
 	o.stopChan = make(chan struct{})
-	o.watcher, err = factory.NewMasterWatchFactory(o.fakeClient)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	o.watcher, _ = factory.NewMasterWatchFactory(o.fakeClient)
 	o.ovnNBClient = ovntest.NewMockOVNClient(goovn.DBNB)
 	o.ovnSBClient = ovntest.NewMockOVNClient(goovn.DBSB)
-	o.nbClient, o.sbClient, err = libovsdbtest.NewNBSBTestHarness(o.dbSetup, o.stopChan)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	o.nbClient, o.sbClient, _ = libovsdbtest.NewNBSBTestHarness(o.dbSetup, o.stopChan)
 	o.controller = NewOvnController(o.fakeClient, o.watcher,
 		o.stopChan, o.asf,
 		o.ovnNBClient, o.ovnSBClient,

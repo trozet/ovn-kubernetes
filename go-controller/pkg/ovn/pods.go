@@ -81,7 +81,7 @@ func (oc *Controller) syncPods(pods []interface{}) {
 		}
 	}
 	// Remove legacy ecmp routes when moving to external bridge
-	oc.cleanECMPRoutes()
+	//oc.cleanECMPRoutes()
 }
 
 func (oc *Controller) deleteLogicalPort(pod *kapi.Pod) {
@@ -263,6 +263,7 @@ func (oc *Controller) getRoutingPodGWs(ns string) map[string]gatewayInfo {
 }
 
 func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
+
 	// If a node does node have an assigned hostsubnet don't wait for the logical switch to appear
 	if oc.lsManager.IsNonHostSubnetSwitch(pod.Spec.NodeName) {
 		return nil
@@ -536,6 +537,7 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) (err error) {
 			portName, err)
 	}
 
+	time.Sleep(300 * time.Millisecond)
 	// observe the pod creation latency metric.
 	metrics.RecordPodCreated(pod)
 	return nil

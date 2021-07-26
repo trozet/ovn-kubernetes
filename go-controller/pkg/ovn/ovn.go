@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"reflect"
+	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"sync"
 	"time"
@@ -296,6 +299,33 @@ func NewOvnController(ovnClient *util.OVNClientset, wf *factory.WatchFactory, st
 
 // Run starts the actual watching.
 func (oc *Controller) Run(wg *sync.WaitGroup, nodeName string) error {
+	go func() {
+		klog.Infof("trozet starting profiling")
+		f, err := os.Create("/tmp/pod_cpu_data")
+		if err != nil {
+			klog.Errorf("error creating pprof file: %v", err)
+		}
+		defer f.Close()
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+
+		m, err := os.Create("/tmp/pod_mem_data")
+		if err != nil {
+			klog.Errorf("could not create memory profile: %v", err)
+		}
+		defer m.Close() // error handling omitted for example
+		runtime.GC()    // get up-to-date statistics
+		if err := pprof.WriteHeapProfile(m); err != nil {
+			klog.Errorf("could not write memory profile: %v", err)
+		}
+
+		for {
+			time.After(10*time.Minute)
+			return
+		}
+
+	}()
+
 	oc.syncPeriodic()
 	klog.Infof("Starting all the Watchers...")
 	start := time.Now()

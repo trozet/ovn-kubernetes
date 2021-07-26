@@ -2,10 +2,10 @@ package ovn
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/urfave/cli/v2"
@@ -185,486 +185,111 @@ var _ = ginkgo.Describe("OVN Pod Operations", func() {
 		fakeOvn.shutdown()
 	})
 
-	ginkgo.Context("during execution", func() {
 
-		ginkgo.It("reconciles an existing pod", func() {
+	ginkgo.Context("podscale", func() {
+		ginkgo.It("scales pods", func() {
+			fmt.Println("TROZET")
 			app.Action = func(ctx *cli.Context) error {
 
-				namespaceT := *newNamespace("namespace1")
-				// Setup an unassigned pod, perform an update later on which assigns it.
-				t := newTPod(
-					"",
-					"10.128.1.0/24",
-					"10.128.1.2",
-					"10.128.1.1",
-					"myPod",
-					"10.128.1.3",
-					"0a:58:0a:80:01:03",
-					namespaceT.Name,
-				)
-				t.baseCmds(fExec)
-
-				fakeOvn.start(ctx,
-					&v1.NamespaceList{
-						Items: []v1.Namespace{
-							namespaceT,
+				pods := make([]*v1.Pod, 500, 500)
+				for i := 0; i < 500; i++ {
+					pods[i] = &v1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace:   "default",
+							Name:        fmt.Sprintf("my-pod:%d", i),
 						},
-					},
-					&v1.PodList{
-						Items: []v1.Pod{
-							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
-						},
-					},
-				)
-				fakeOvn.controller.WatchNamespaces()
-				fakeOvn.controller.WatchPods()
-
-				pod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Get(context.TODO(), t.podName, metav1.GetOptions{})
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				gomega.Expect(fExec.CalledMatchesExpected()).To(gomega.BeTrue(), fExec.ErrorDesc)
-
-				_, ok := pod.Annotations[util.OvnPodAnnotationName]
-				gomega.Expect(ok).To(gomega.BeFalse())
-
-				// Assign it and perform the update
-				t.nodeName = "node1"
-				t.portName = t.namespace + "_" + t.podName
-				t.populateLogicalSwitchCache(fakeOvn)
-
-				_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Update(context.TODO(), newPod(t.namespace, t.podName, t.nodeName, t.podIP), metav1.UpdateOptions{})
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				gomega.Eventually(fExec.CalledMatchesExpected).Should(gomega.BeTrue(), fExec.ErrorDesc)
-
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-
-				return nil
-			}
-
-			err := app.Run([]string{app.Name})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		})
-
-		ginkgo.It("reconciles a new pod", func() {
-			app.Action = func(ctx *cli.Context) error {
-				namespaceT := *newNamespace("namespace1")
-				t := newTPod(
-					"node1",
-					"10.128.1.0/24",
-					"10.128.1.2",
-					"10.128.1.1",
-					"myPod",
-					"10.128.1.3",
-					"0a:58:0a:80:01:03",
-					namespaceT.Name,
-				)
-
-				t.baseCmds(fExec)
-
-				fakeOvn.start(ctx,
-					&v1.NamespaceList{
-						Items: []v1.Namespace{
-							namespaceT,
-						},
-					},
-					&v1.PodList{
-						Items: []v1.Pod{},
-					},
-				)
-				t.populateLogicalSwitchCache(fakeOvn)
-				fakeOvn.controller.WatchNamespaces()
-				fakeOvn.controller.WatchPods()
-
-				pod, _ := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Get(context.TODO(), t.podName, metav1.GetOptions{})
-				gomega.Expect(pod).To(gomega.BeNil())
-				gomega.Expect(fExec.CalledMatchesExpected()).To(gomega.BeTrue(), fExec.ErrorDesc)
-
-				_, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Create(context.TODO(), newPod(t.namespace, t.podName, t.nodeName, t.podIP), metav1.CreateOptions{})
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				gomega.Eventually(fExec.CalledMatchesExpected).Should(gomega.BeTrue(), fExec.ErrorDesc)
-
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-
-				return nil
-			}
-
-			err := app.Run([]string{app.Name})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		})
-
-		ginkgo.It("reconciles a deleted pod", func() {
-			app.Action = func(ctx *cli.Context) error {
-
-				namespaceT := *newNamespace("namespace1")
-				// Setup an assigned pod
-				t := newTPod(
-					"node1",
-					"10.128.1.0/24",
-					"10.128.1.2",
-					"10.128.1.1",
-					"myPod",
-					"10.128.1.3",
-					"0a:58:0a:80:01:03",
-					namespaceT.Name,
-				)
-
-				fakeOvn.start(ctx,
-					&v1.NamespaceList{
-						Items: []v1.Namespace{
-							namespaceT,
-						},
-					},
-					&v1.PodList{
-						Items: []v1.Pod{
-							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
-						},
-					},
-				)
-				t.populateLogicalSwitchCache(fakeOvn)
-				t.baseCmds(fExec)
-
-				fakeOvn.controller.WatchNamespaces()
-				fakeOvn.controller.WatchPods()
-
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-				gomega.Eventually(fExec.CalledMatchesExpected).Should(gomega.BeTrue(), fExec.ErrorDesc)
-
-				err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Delete(context.TODO(), t.podName, *metav1.NewDeleteOptions(0))
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				gomega.Eventually(fExec.CalledMatchesExpected).Should(gomega.BeTrue(), fExec.ErrorDesc)
-
-				pod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Get(context.TODO(), t.podName, metav1.GetOptions{})
-				gomega.Expect(err).To(gomega.HaveOccurred())
-				gomega.Expect(pod).To(gomega.BeNil())
-
-				return nil
-			}
-
-			err := app.Run([]string{app.Name})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		})
-
-		ginkgo.It("retries a failed pod Add on Update", func() {
-			app.Action = func(ctx *cli.Context) error {
-
-				namespaceT := *newNamespace("namespace1")
-				// Setup an unassigned pod, perform an update later on which assigns it.
-				t := newTPod(
-					"node1",
-					"10.128.1.0/24",
-					"10.128.1.2",
-					"10.128.1.1",
-					"myPod",
-					"10.128.1.3",
-					"0a:58:0a:80:01:03",
-					namespaceT.Name,
-				)
-				t.baseCmds(fExec)
-
-				fakeOvn.start(ctx,
-					&v1.NamespaceList{
-						Items: []v1.Namespace{
-							namespaceT,
-						},
-					},
-					&v1.PodList{
-						Items: []v1.Pod{
-							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
-						},
-					},
-				)
-				t.populateLogicalSwitchCache(fakeOvn)
-				mockAddNBDBError(ovntest.LogicalSwitchPortType, t.portName,
-					ovntest.LogicalSwitchPortExternalId,
-					fmt.Errorf("injected dummy port external_ids set error"),
-					fakeOvn.ovnNBClient)
-				fakeOvn.controller.WatchNamespaces()
-				fakeOvn.controller.WatchPods()
-				gomega.Expect(fExec.CalledMatchesExpected()).To(gomega.BeTrue(), fExec.ErrorDesc)
-				// allow pod retry from update annotation to fail
-				time.Sleep(2 * time.Second)
-				mockDelNBDBError(ovntest.LogicalSwitchPortType, t.portName,
-					ovntest.LogicalSwitchPortExternalId,
-					fakeOvn.ovnNBClient)
-				patch := struct {
-					Metadata map[string]interface{} `json:"metadata"`
-				}{
-					Metadata: map[string]interface{}{
-						"annotations": map[string]string{"dummy": "data"},
-					},
+					}
 				}
-				patchData, err := json.Marshal(&patch)
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				// trigger update event
-				_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Patch(context.TODO(), t.podName, types.MergePatchType, patchData, metav1.PatchOptions{})
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				gomega.Eventually(fExec.CalledMatchesExpected).Should(gomega.BeTrue(), fExec.ErrorDesc)
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-				return nil
-			}
-
-			err := app.Run([]string{app.Name})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		})
-
-		ginkgo.It("pod Add should succeed even when namespace doesn't yet exist", func() {
-			app.Action = func(ctx *cli.Context) error {
-
-				namespaceT := newNamespace("namespace1")
-				t := newTPod(
-					"node1",
-					"10.128.1.0/24",
-					"10.128.1.2",
-					"10.128.1.1",
-					"myPod",
-					"10.128.1.3",
-					"0a:58:0a:80:01:03",
-					namespaceT.Name,
-				)
-				podJSON := `{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`
-				t.baseCmds(fExec)
-
-				fakeOvn.start(ctx)
-				t.populateLogicalSwitchCache(fakeOvn)
-				fakeOvn.controller.WatchNamespaces()
-				fakeOvn.controller.WatchPods()
-				gomega.Expect(fExec.CalledMatchesExpected()).To(gomega.BeTrue(), fExec.ErrorDesc)
-
-				// Add pod before namespace; pod will be annotated
-				// but namespace address set will not exist
-				_, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Create(context.TODO(), newPod(t.namespace, t.podName, t.nodeName, t.podIP), metav1.CreateOptions{})
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(podJSON))
-
-				// Add Pod logical port should succeed even without namespace
-				gomega.Eventually(fExec.CalledMatchesExpected).Should(gomega.BeTrue(), fExec.ErrorDesc)
-				gomega.Expect(getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName)).Should(gomega.MatchJSON(podJSON))
-
-				lsp, err := fakeOvn.ovnNBClient.LSPGet(t.namespace + "_" + t.podName)
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				gomega.Expect(lsp.Addresses).To(gomega.HaveLen(1))
-				gomega.Expect(lsp.Addresses[0]).To(gomega.ContainSubstring(t.podIP))
-				return nil
-			}
-
-			err := app.Run([]string{app.Name})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		})
-	})
-
-	ginkgo.Context("on startup", func() {
-
-		ginkgo.It("reconciles an existing pod", func() {
-			app.Action = func(ctx *cli.Context) error {
-
-				namespaceT := *newNamespace("namespace1")
-				t := newTPod(
-					"node1",
-					"10.128.1.0/24",
-					"10.128.1.2",
-					"10.128.1.1",
-					"myPod",
-					"10.128.1.3",
-					"0a:58:0a:80:01:03",
-					namespaceT.Name,
-				)
-
-				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
-					Output: t.portName + "\n",
-				})
-				fExec.AddFakeCmdsNoOutputNoError([]string{
-					"ovn-nbctl --timeout=15 --if-exists lsp-del " + t.portName,
-				})
 
 				fakeOvn.start(ctx,
 					&v1.NamespaceList{
-						Items: []v1.Namespace{
-							namespaceT,
-						},
 					},
 					&v1.PodList{
-						Items: []v1.Pod{
-							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
-						},
 					},
 				)
-				t.populateLogicalSwitchCache(fakeOvn)
-				t.baseCmds(fExec)
-
-				pod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Get(context.TODO(), t.podName, metav1.GetOptions{})
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-				_, ok := pod.Annotations[util.OvnPodAnnotationName]
-				gomega.Expect(ok).To(gomega.BeFalse())
-
-				fakeOvn.controller.WatchNamespaces()
 				fakeOvn.controller.WatchPods()
 
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-
+				for _, pod := range pods {
+					_, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods("default").Create(context.TODO(), pod, metav1.CreateOptions{})
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				}
 				return nil
 			}
 
 			err := app.Run([]string{app.Name})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		})
-
-		ginkgo.It("reconciles a new pod", func() {
-			app.Action = func(ctx *cli.Context) error {
-
-				namespaceT := *newNamespace("namespace1")
-				t := newTPod(
-					"node1",
-					"10.128.1.0/24",
-					"10.128.1.2",
-					"10.128.1.1",
-					"myPod",
-					"10.128.1.3",
-					"0a:58:0a:80:01:03",
-					namespaceT.Name,
-				)
-				t.baseCmds(fExec)
-
-				fExec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd:    "ovn-nbctl --timeout=15 --data=bare --no-heading --columns=name find logical_switch_port external_ids:pod=true",
-					Output: "\n",
-				})
-
-				fakeOvn.start(ctx,
-					&v1.NamespaceList{
-						Items: []v1.Namespace{
-							namespaceT,
-						},
-					},
-					&v1.PodList{
-						Items: []v1.Pod{
-							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
-						},
-					},
-				)
-				t.populateLogicalSwitchCache(fakeOvn)
-				fakeOvn.controller.WatchNamespaces()
-				fakeOvn.controller.WatchPods()
-
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-
-				return nil
-			}
-
-			err := app.Run([]string{app.Name})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		})
-	})
-
-	ginkgo.Context("on ovn restart", func() {
-
-		ginkgo.It("reconciles an existing pod without an existing logical switch port", func() {
-			app.Action = func(ctx *cli.Context) error {
-
-				namespaceT := *newNamespace("namespace1")
-				t := newTPod(
-					"node1",
-					"10.128.1.0/24",
-					"10.128.1.2",
-					"10.128.1.1",
-					"myPod",
-					"10.128.1.3",
-					"0a:58:0a:80:01:03",
-					namespaceT.Name,
-				)
-				t.baseCmds(fExec)
-
-				fakeOvn.start(ctx,
-					&v1.NamespaceList{
-						Items: []v1.Namespace{
-							namespaceT,
-						},
-					},
-					&v1.PodList{
-						Items: []v1.Pod{
-							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
-						},
-					},
-				)
-				t.populateLogicalSwitchCache(fakeOvn)
-				fakeOvn.controller.WatchNamespaces()
-				fakeOvn.controller.WatchPods()
-
-				gomega.Expect(fExec.CalledMatchesExpected()).To(gomega.BeTrue(), fExec.ErrorDesc)
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-				// Simulate an OVN restart with a new IP assignment and verify that the pod annotation is updated.
-
-				t.populateLogicalSwitchCache(fakeOvn)
-
-				fakeOvn.restart()
-				t.baseCmds(fExec)
-
-				t.populateLogicalSwitchCache(fakeOvn)
-				fakeOvn.controller.WatchNamespaces()
-				fakeOvn.controller.WatchPods()
-
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-				gomega.Eventually(fExec.CalledMatchesExpected).Should(gomega.BeTrue(), fExec.ErrorDesc)
-
-				return nil
-			}
-
-			err := app.Run([]string{app.Name})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		})
-
-		ginkgo.It("reconciles an existing pod with an existing logical switch port", func() {
-			app.Action = func(ctx *cli.Context) error {
-
-				namespaceT := *newNamespace("namespace1")
-				t := newTPod(
-					"node1",
-					"10.128.1.0/24",
-					"10.128.1.2",
-					"10.128.1.1",
-					"myPod",
-					"10.128.1.3",
-					"0a:58:0a:80:01:03",
-					namespaceT.Name,
-				)
-				t.baseCmds(fExec)
-
-				fakeOvn.start(ctx,
-					&v1.NamespaceList{
-						Items: []v1.Namespace{
-							namespaceT,
-						},
-					},
-					&v1.PodList{
-						Items: []v1.Pod{
-							*newPod(t.namespace, t.podName, t.nodeName, t.podIP),
-						},
-					},
-				)
-				t.populateLogicalSwitchCache(fakeOvn)
-				fakeOvn.controller.WatchNamespaces()
-				fakeOvn.controller.WatchPods()
-
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-				gomega.Expect(fExec.CalledMatchesExpected()).To(gomega.BeTrue(), fExec.ErrorDesc)
-
-				t.populateLogicalSwitchCache(fakeOvn)
-
-				fakeOvn.restart()
-				t.baseCmds(fExec)
-
-				t.populateLogicalSwitchCache(fakeOvn)
-				fakeOvn.controller.WatchNamespaces()
-				fakeOvn.controller.WatchPods()
-
-				gomega.Eventually(func() string { return getPodAnnotations(fakeOvn.fakeClient.KubeClient, t.namespace, t.podName) }, 2).Should(gomega.MatchJSON(`{"default": {"ip_addresses":["` + t.podIP + `/24"], "mac_address":"` + t.podMAC + `", "gateway_ips": ["` + t.nodeGWIP + `"], "ip_address":"` + t.podIP + `/24", "gateway_ip": "` + t.nodeGWIP + `"}}`))
-				gomega.Eventually(fExec.CalledMatchesExpected).Should(gomega.BeTrue(), fExec.ErrorDesc)
-
-				return nil
-			}
-
-			err := app.Run([]string{app.Name})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			time.After(10* time.Second)
 		})
 	})
 })
+
+
+func TestPodScale(*testing.T) {
+	var (
+		app     *cli.App
+		fakeOvn *FakeOVN
+		fExec   *ovntest.FakeExec
+	)
+
+	config.PrepareTestConfig()
+
+	config.IPv6Mode = true
+	config.IPv4Mode = false
+	app = cli.NewApp()
+	app.Name = "test"
+	app.Flags = config.Flags
+
+	fExec = ovntest.NewFakeExec()
+	fakeOvn = NewFakeOVN(fExec)
+	fmt.Println("TROZET")
+	app.Action = func(ctx *cli.Context) error {
+
+		config.IPv6Mode = true
+		config.IPv4Mode = false
+		numPods := 5000
+		pods := make([]v1.Pod, numPods, numPods)
+		for i := 0; i < numPods; i++ {
+			pods[i] = v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      fmt.Sprintf("my-pod:%d", i),
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name:  "containerName",
+							Image: "containerImage",
+						},
+					},
+					NodeName: "node1",
+				},
+			}
+		}
+
+		fakeOvn.start(ctx,
+			&v1.NamespaceList{
+				Items: []v1.Namespace{
+					v1.Namespace{
+						ObjectMeta: metav1.ObjectMeta{
+							UID:         types.UID("default"),
+							Name:        "default",
+						},
+						Spec:       v1.NamespaceSpec{},
+						Status:     v1.NamespaceStatus{},
+					},
+				},
+			},
+			&v1.PodList{
+				Items: pods,
+			},
+		)
+		fakeOvn.controller.lsManager.AddNode("node1", []*net.IPNet{ovntest.MustParseIPNet("fdda:9005:a1c5:bd04::/64")})
+		fakeOvn.controller.WatchNamespaces()
+		fakeOvn.controller.WatchPods()
+
+		return nil
+	}
+
+	app.Run([]string{app.Name})
+	fakeOvn.shutdown()
+}
