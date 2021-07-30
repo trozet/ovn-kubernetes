@@ -240,7 +240,7 @@ jobs:
         path: /tmp/kind/logs-kind-pr-branch
 
   e2e:
-    name: e2e
+    name: 'e2e-${{ matrix.target.shard }}-${{ matrix.ha.name }}-${{ matrix.disable-snat-multiple-gws.name }}-${{ matrix.gateway-mode }}-${{matrix.ipfamily.name}}-${{matrix.second-bridge.name}}'
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -322,7 +322,7 @@ jobs:
          - {"second-bridge": {"enabled": "false"}, "disable-snat-multiple-gws": {"enabled": "true"}}
     needs: [ build-pr ]
     env:
-      JOB_NAME: "${{ matrix.target.shard }}-${{ matrix.ha.name }}-${{ matrix.gateway-mode }}-${{ matrix.ipfamily.name }}-${{ matrix.disable-snat-multiple-gws.name }}-${{ matrix.second-bridge.name }}"
+      #JOB_NAME: "${{ matrix.target.shard }}-${{ matrix.ha.name }}-${{ matrix.gateway-mode }}-${{ matrix.ipfamily.name }}-${{ matrix.disable-snat-multiple-gws.name }}-${{ matrix.second-bridge.name }}"
       OVN_HA: "${{ matrix.ha.enabled }}"
       KIND_IPV4_SUPPORT: "${{ matrix.ipfamily.ipv4 }}"
       KIND_IPV6_SUPPORT: "${{ matrix.ipfamily.ipv6 }}"
