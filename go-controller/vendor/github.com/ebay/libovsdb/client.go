@@ -100,6 +100,7 @@ func newRPC2Client(conn net.Conn) (*OvsdbClient, error) {
 	c.SetBlocking(true)
 	c.Handle("echo", echo)
 	c.Handle("update", update)
+	// TODO(trozet) ALSO handle monitor cancel
 	go c.Run()
 	go handleDisconnectNotification(c)
 
