@@ -2,6 +2,7 @@ package ovn
 
 import (
 	"fmt"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	"net"
 	"strings"
 	"sync"
@@ -26,6 +27,9 @@ const (
 	egressFirewallAppliedCorrectly = "EgressFirewall Rules applied"
 	egressFirewallAddError         = "EgressFirewall Rules not correctly added"
 	egressFirewallUpdateError      = "EgressFirewall Rules not correctly updated"
+	allowAction                    = "allow"
+	allowRelatedAction             = "allow-related"
+	denyAction                     = "drop"
 )
 
 type egressFirewall struct {
@@ -109,29 +113,20 @@ func (oc *Controller) syncEgressFirewallRetriable(egressFirewalls []interface{})
 		return fmt.Errorf("unable to list egress firewall ACLs, cannot cleanup old stale data, err: %v", err)
 	}
 
-	if config.Gateway.Mode == config.GatewayModeShared {
-		// Mode is shared gateway mode, make sure to delete all egfw ACLs on the node switches
-		if len(egressFirewallACLs) != 0 {
-			err = libovsdbops.RemoveACLsFromNodeSwitches(oc.nbClient, egressFirewallACLs)
-			if err != nil {
-				return fmt.Errorf("failed to remove reject acl from node logical switches: %v", err)
-			}
-		}
-	} else if config.Gateway.Mode == config.GatewayModeLocal {
-		// Mode is local gateway mode, make sure to delete all egfw ACLs on the join switches
-		if len(egressFirewallACLs) != 0 {
-			err = libovsdbops.RemoveACLsFromJoinSwitch(oc.nbClient, egressFirewallACLs)
-			if err != nil {
-				return fmt.Errorf("failed to remove reject acl from node logical switches: %v", err)
-			}
+	// Mode is local gateway mode, make sure to delete all egfw ACLs on the join switches
+	if len(egressFirewallACLs) != 0 {
+		err = libovsdbops.RemoveACLsFromJoinSwitch(oc.nbClient, egressFirewallACLs)
+		if err != nil {
+			return fmt.Errorf("failed to remove reject acl from node logical switches: %v", err)
 		}
 	}
+
 	// update the direction of each egressFirewallACL if needed
 	if len(egressFirewallACLs) != 0 {
 		opModels := []libovsdbops.OperationModel{}
 		for i := range egressFirewallACLs {
 			egressFirewallACL := egressFirewallACLs[i]
-			egressFirewallACL.Direction = types.DirectionToLPort
+			egressFirewallACL.Direction = types.DirectionFromLPort
 			aclName := ""
 			if egressFirewallACL.Name != nil {
 				aclName = *egressFirewallACL.Name
@@ -198,6 +193,7 @@ func (oc *Controller) syncEgressFirewallRetriable(egressFirewalls []interface{})
 	for _, egressFirewall := range egressFirewallList.Items {
 		delete(ovnEgressFirewalls, egressFirewall.Namespace)
 	}
+	delete(ovnEgressFirewalls, "reserved")
 	// any that are left are spurious and should be cleaned up
 	for spuriousEF := range ovnEgressFirewalls {
 		err := oc.deleteEgressFirewallRules(spuriousEF)
@@ -205,7 +201,9 @@ func (oc *Controller) syncEgressFirewallRetriable(egressFirewalls []interface{})
 			return fmt.Errorf("cannot fully reconcile the state of egressfirewalls ACLs for namespace %s still exist in ovn db: %v", spuriousEF, err)
 		}
 	}
-	return nil
+
+	// ensure egress firewall bypass rules are created
+	return oc.createEgressFirewallBypassACLs()
 }
 
 func (oc *Controller) addEgressFirewall(egressFirewall *egressfirewallapi.EgressFirewall) error {
@@ -313,9 +311,9 @@ func (oc *Controller) addEgressFirewallRules(ef *egressFirewall, hashedAddressSe
 		var action string
 		var matchTargets []matchTarget
 		if rule.access == egressfirewallapi.EgressFirewallRuleAllow {
-			action = "allow"
+			action = allowAction
 		} else {
-			action = "drop"
+			action = denyAction
 		}
 		if rule.to.cidrSelector != "" {
 			if utilnet.IsIPv6CIDRString(rule.to.cidrSelector) {
@@ -337,7 +335,7 @@ func (oc *Controller) addEgressFirewallRules(ef *egressFirewall, hashedAddressSe
 				matchTargets = append(matchTargets, matchTarget{matchKindV6AddressSet, dnsNameIPv6ASHashName})
 			}
 		}
-		match := generateMatch(hashedAddressSetNameIPv4, hashedAddressSetNameIPv6, matchTargets, rule.ports)
+		match := generateMatch(hashedAddressSetNameIPv4, hashedAddressSetNameIPv6, matchTargets, rule.ports, action)
 		err := oc.createEgressFirewallRules(efStartPriority-rule.id, match, action, ef.namespace)
 		if err != nil {
 			return err
@@ -350,21 +348,17 @@ func (oc *Controller) addEgressFirewallRules(ef *egressFirewall, hashedAddressSe
 // logical_router_policy/join_switch_acl for a specific egressFirewallRouter
 func (oc *Controller) createEgressFirewallRules(priority int, match, action, externalID string) error {
 	logicalSwitches := []string{}
-	if config.Gateway.Mode == config.GatewayModeLocal {
-		nodeLocalSwitches, err := libovsdbops.FindAllNodeLocalSwitches(oc.nbClient)
-		if err != nil {
-			return fmt.Errorf("unable to setup egress firewall ACLs on cluster nodes, err: %v", err)
-		}
-		for _, nodeLocalSwitch := range nodeLocalSwitches {
-			logicalSwitches = append(logicalSwitches, nodeLocalSwitch.Name)
-		}
-	} else {
-		logicalSwitches = append(logicalSwitches, types.OVNJoinSwitch)
+	nodeLocalSwitches, err := libovsdbops.FindAllNodeLocalSwitches(oc.nbClient)
+	if err != nil {
+		return fmt.Errorf("unable to setup egress firewall ACLs on cluster nodes, err: %v", err)
+	}
+	for _, nodeLocalSwitch := range nodeLocalSwitches {
+		logicalSwitches = append(logicalSwitches, nodeLocalSwitch.Name)
 	}
 
 	egressFirewallACL := &nbdb.ACL{
 		Priority:    priority,
-		Direction:   types.DirectionToLPort,
+		Direction:   types.DirectionFromLPort,
 		Match:       match,
 		Action:      action,
 		ExternalIDs: map[string]string{"egressFirewall": externalID},
@@ -483,10 +477,9 @@ func (m *matchTarget) toExpr() (string, error) {
 // It is referentially transparent as all the elements have been validated before this function is called
 // sample output:
 // match=\"(ip4.dst == 1.2.3.4/32) && ip4.src == $testv4 && ip4.dst != 10.128.0.0/14\
-func generateMatch(ipv4Source, ipv6Source string, destinations []matchTarget, dstPorts []egressfirewallapi.EgressFirewallPort) string {
+func generateMatch(ipv4Source, ipv6Source string, destinations []matchTarget, dstPorts []egressfirewallapi.EgressFirewallPort, action string) string {
 	var src string
 	var dst string
-	var extraMatch string
 	switch {
 	case config.IPv4Mode && config.IPv6Mode:
 		src = fmt.Sprintf("(ip4.src == $%s || ip6.src == $%s)", ipv4Source, ipv6Source)
@@ -517,12 +510,7 @@ func generateMatch(ipv4Source, ipv6Source string, destinations []matchTarget, ds
 		match = fmt.Sprintf("%s && %s", match, egressGetL4Match(dstPorts))
 	}
 
-	if config.Gateway.Mode == config.GatewayModeLocal {
-		extraMatch = getClusterSubnetsExclusion()
-	} else {
-		extraMatch = fmt.Sprintf("inport == \"%s%s\"", types.JoinSwitchToGWRouterPrefix, types.OVNClusterRouter)
-	}
-	return fmt.Sprintf("%s && %s", match, extraMatch)
+	return match
 }
 
 // egressGetL4Match generates the rules for when ports are specified in an egressFirewall Rule
@@ -592,17 +580,53 @@ func egressGetL4Match(ports []egressfirewallapi.EgressFirewallPort) string {
 	return fmt.Sprintf("(%s)", l4Match)
 }
 
-func getClusterSubnetsExclusion() string {
-	var exclusion string
+func (oc *Controller) createEgressFirewallBypassACLs() error {
+	var match string
+	switch {
+	case config.IPv4Mode && config.IPv6Mode:
+		ipNet, err := util.MatchIPNetFamily(false, config.Kubernetes.ServiceCIDRs)
+		if err != nil {
+			klog.Errorf("Unable to find ipv4 service cidr in %#v", config.Kubernetes.ServiceCIDRs)
+		}
+
+		ip6Net, err := util.MatchIPNetFamily(true, config.Kubernetes.ServiceCIDRs)
+		if err != nil {
+			klog.Errorf("Unable to find ipv6 service cidr in %#v", config.Kubernetes.ServiceCIDRs)
+		}
+
+		match = fmt.Sprintf("(ip4.dst == %s || ip6.dst == %s)", ipNet.String(), ip6Net.String())
+	case config.IPv4Mode:
+		ipNet, err := util.MatchIPNetFamily(false, config.Kubernetes.ServiceCIDRs)
+		if err != nil {
+			klog.Errorf("Unable to find ipv4 service cidr in %#v", config.Kubernetes.ServiceCIDRs)
+		}
+		match = fmt.Sprintf("ip4.dst == %s", ipNet.String())
+	case config.IPv6Mode:
+		ipNet, err := util.MatchIPNetFamily(true, config.Kubernetes.ServiceCIDRs)
+		if err != nil {
+			klog.Errorf("Unable to find ipv6 service cidr in %#v", config.Kubernetes.ServiceCIDRs)
+		}
+		match = fmt.Sprintf("ip4.dst == %s", ipNet.String())
+	}
+
+	if err := oc.createEgressFirewallRules(types.ReservedMaxACLPriority, match, allowRelatedAction, "reserved"); err != nil {
+		return fmt.Errorf("unable to create service bypass ACL for egress firewall: %w", err)
+	}
+
+	match = ""
 	for _, clusterSubnet := range config.Default.ClusterSubnets {
-		if exclusion != "" {
-			exclusion += " && "
+		if match != "" {
+			match += " && "
 		}
 		if utilnet.IsIPv6CIDR(clusterSubnet.CIDR) {
-			exclusion += fmt.Sprintf("%s.dst != %s", "ip6", clusterSubnet.CIDR)
+			match += fmt.Sprintf("%s.dst == %s", "ip6", clusterSubnet.CIDR)
 		} else {
-			exclusion += fmt.Sprintf("%s.dst != %s", "ip4", clusterSubnet.CIDR)
+			match += fmt.Sprintf("%s.dst == %s", "ip4", clusterSubnet.CIDR)
 		}
 	}
-	return exclusion
+
+	if err := oc.createEgressFirewallRules(types.ReservedMaxACLPriority, match, allowRelatedAction, "reserved"); err != nil {
+		return fmt.Errorf("unable to create pod east/west bypass ACL for egress firewall: %w", err)
+	}
+	return nil
 }

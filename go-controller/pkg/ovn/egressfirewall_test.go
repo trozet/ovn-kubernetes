@@ -59,6 +59,8 @@ var _ = ginkgo.Describe("OVN EgressFirewall Operations for local gateway mode", 
 		config.PrepareTestConfig()
 		config.Gateway.Mode = config.GatewayModeLocal
 		config.OVNKubernetesFeature.EnableEgressFirewall = true
+		_, ipnet, _ := net.ParseCIDR("10.96.0.0/16")
+		config.Kubernetes.ServiceCIDRs = []*net.IPNet{ipnet}
 
 		app = cli.NewApp()
 		app.Name = "test"
@@ -687,6 +689,8 @@ var _ = ginkgo.Describe("OVN EgressFirewall Operations for shared gateway mode",
 		config.PrepareTestConfig()
 		config.Gateway.Mode = config.GatewayModeShared
 		config.OVNKubernetesFeature.EnableEgressFirewall = true
+		_, ipnet, _ := net.ParseCIDR("10.96.0.0/16")
+		config.Kubernetes.ServiceCIDRs = []*net.IPNet{ipnet}
 
 		app = cli.NewApp()
 		app.Name = "test"
@@ -1315,6 +1319,7 @@ var _ = ginkgo.Describe("OVN test basic functions", func() {
 			ipv6Mode     bool
 			destinations []matchTarget
 			ports        []egressfirewallapi.EgressFirewallPort
+			action       string
 			output       string
 		}
 		testcases := []testcase{
@@ -1378,6 +1383,17 @@ var _ = ginkgo.Describe("OVN test basic functions", func() {
 				ports:        nil,
 				output:       "(ip6.dst == $destv6) && ip6.src == $testv6 && inport == \"" + t.JoinSwitchToGWRouterPrefix + t.OVNClusterRouter + "\"",
 			},
+			{
+				internalCIDR: "2002:0:0:1234::/64",
+				ipv4source:   "",
+				ipv6source:   "testv6",
+				ipv4Mode:     false,
+				ipv6Mode:     true,
+				destinations: []matchTarget{{matchKindV6AddressSet, "destv6"}},
+				ports:        nil,
+				action:       denyAction,
+				output:       "(ip6.dst == $destv6) && ip6.src == $testv6 && inport == \"" + t.JoinSwitchToGWRouterPrefix + t.OVNClusterRouter + "\"",
+			},
 		}
 
 		for _, tc := range testcases {
@@ -1386,7 +1402,7 @@ var _ = ginkgo.Describe("OVN test basic functions", func() {
 			_, cidr, _ := net.ParseCIDR(tc.internalCIDR)
 			config.Default.ClusterSubnets = []config.CIDRNetworkEntry{{CIDR: cidr}}
 			config.Gateway.Mode = config.GatewayModeShared
-			matchExpression := generateMatch(tc.ipv4source, tc.ipv6source, tc.destinations, tc.ports)
+			matchExpression := generateMatch(tc.ipv4source, tc.ipv6source, tc.destinations, tc.ports, tc.action)
 			gomega.Expect(tc.output).To(gomega.Equal(matchExpression))
 		}
 	})

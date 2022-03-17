@@ -49,18 +49,26 @@ const (
 
 	// ACL Priorities
 
-	// Default routed multicast allow acl rule priority
-	DefaultRoutedMcastAllowPriority = 1013
 	// Default multicast allow acl rule priority
-	DefaultMcastAllowPriority = 1012
+	DefaultMcastAllowPriority = 11012
 	// Default multicast deny acl rule priority
-	DefaultMcastDenyPriority = 1011
+	DefaultMcastDenyPriority = 11011
 	// Default allow acl rule priority
-	DefaultAllowPriority = 1001
+	DefaultAllowPriority = 11001
 	// Default deny acl rule priority
-	DefaultDenyPriority = 1000
+	DefaultDenyPriority = 11000
+
+	// Default multicast allow acl rule priority
+	LegacyDefaultMcastAllowPriority = 1012
+	// Default multicast deny acl rule priority
+	LegacyDefaultMcastDenyPriority = 1011
+	// Default allow acl rule priority
+	LegacyDefaultAllowPriority = 1001
+	// Default deny acl rule priority
+	LegacyDefaultDenyPriority = 1000
 
 	// priority of logical router policies on the OVNClusterRouter
+	ReservedMaxACLPriority                = 10200
 	EgressFirewallStartPriority           = 10000
 	MinimumReservedEgressFirewallPriority = 2000
 	MGMTPortPolicyPriority                = "1005"
