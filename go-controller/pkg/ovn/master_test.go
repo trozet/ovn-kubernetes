@@ -994,7 +994,16 @@ var _ = ginkgo.Describe("Gateway Init Operations", func() {
 			subnet := ovntest.MustParseIPNet(node1.NodeSubnet)
 			err = clusterController.syncGatewayLogicalNetwork(updatedNode, l3GatewayConfig, []*net.IPNet{subnet}, hostAddrs)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
+			clusterController.retryNodes.initRetryObjWithAdd(testNode, testNode.Name)
+			gomega.Expect(len(clusterController.retryNodes.entries)).To(gomega.Equal(1))
+			if retryEntry := clusterController.retryNodes.getObjRetryEntry(testNode.Name); retryEntry != nil {
+				gomega.Expect(retryEntry).ToNot(gomega.BeNil())
+				gomega.Expect(retryEntry.newObj).ToNot(gomega.BeNil())
+				gomega.Expect(retryEntry.oldObj).To(gomega.BeNil())
+				gomega.Expect(retryEntry.ignore).To(gomega.BeTrue())
+			}
+			clusterController.retryNodes.checkAndDeleteRetryObj(testNode.Name, true)
+			gomega.Expect(clusterController.retryNodes.entries[testNode.Name]).To(gomega.BeNil())
 			var clusterSubnets []*net.IPNet
 			for _, clusterSubnet := range config.Default.ClusterSubnets {
 				clusterSubnets = append(clusterSubnets, clusterSubnet.CIDR)
