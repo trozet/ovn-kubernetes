@@ -1059,7 +1059,8 @@ func (oc *Controller) WatchNodes() {
 				oc.retryNodes.removeDeleteFromRetryObj(node.Name)
 			}
 			start := time.Now()
-			if err := oc.addUpdateNodeEvent(node, nil); err != nil {
+			// sync everything, new node add
+			if err := oc.addUpdateNodeEvent(node, true, true, true, true); err != nil {
 				klog.Errorf("Failed to create node %s, error: %v",
 					node.Name, err)
 				oc.retryNodes.unSkipRetryObj(node.Name)
@@ -1071,6 +1072,15 @@ func (oc *Controller) WatchNodes() {
 		UpdateFunc: func(old, new interface{}) {
 			oldNode := old.(*kapi.Node)
 			newNode := new.(*kapi.Node)
+			shouldUpdate, err := shouldUpdate(newNode, oldNode)
+			if err != nil {
+				klog.Errorf(err.Error())
+			}
+			if !shouldUpdate {
+				// the hostsubnet is not assigned by ovn-kubernetes
+				return
+			}
+
 			oc.retryNodes.checkAndSkipRetryObj(newNode.Name)
 			if retryEntry := oc.retryNodes.getObjRetryEntry(newNode.Name); retryEntry != nil && retryEntry.oldObj != nil {
 				klog.Infof("Detected leftover old node during new node add  %s.", newNode.Name)
@@ -1083,7 +1093,17 @@ func (oc *Controller) WatchNodes() {
 				// deletion was a success; remove delete retry entry
 				oc.retryNodes.removeDeleteFromRetryObj(newNode.Name)
 			}
-			if err := oc.addUpdateNodeEvent(newNode, oldNode); err != nil {
+
+			// determine what actually changed in this update
+			_, nodeSync := oc.addNodeFailed.Load(newNode.Name)
+			_, failed := oc.nodeClusterRouterPortFailed.Load(newNode.Name)
+			clusterRtrSync := failed || nodeChassisChanged(oldNode, newNode) || nodeSubnetChanged(oldNode, newNode)
+			_, failed = oc.mgmtPortFailed.Load(newNode.Name)
+			mgmtSync := failed || macAddressChanged(oldNode, newNode) || nodeSubnetChanged(oldNode, newNode)
+			_, failed = oc.gatewaysFailed.Load(newNode.Name)
+			gwSync := failed || gatewayChanged(oldNode, newNode) || nodeSubnetChanged(oldNode, newNode) || hostAddressesChanged(oldNode, newNode)
+
+			if err := oc.addUpdateNodeEvent(newNode, nodeSync, clusterRtrSync, mgmtSync, gwSync); err != nil {
 				klog.Errorf("Failed to update node %s, error: %v", newNode.Name, err)
 				oc.retryNodes.initRetryObjWithAdd(newNode, newNode.Name)
 				oc.retryNodes.unSkipRetryObj(newNode.Name)
@@ -1147,9 +1167,6 @@ func (oc *Controller) aclLoggingCanEnable(annotation string, nsInfo *namespaceIn
 
 // gatewayChanged() compares old annotations to new and returns true if something has changed.
 func gatewayChanged(oldNode, newNode *kapi.Node) bool {
-	if oldNode == nil {
-		return false
-	}
 	oldL3GatewayConfig, _ := util.ParseNodeL3GatewayAnnotation(oldNode)
 	l3GatewayConfig, _ := util.ParseNodeL3GatewayAnnotation(newNode)
 	return !reflect.DeepEqual(oldL3GatewayConfig, l3GatewayConfig)
@@ -1157,9 +1174,6 @@ func gatewayChanged(oldNode, newNode *kapi.Node) bool {
 
 // hostAddressesChanged compares old annotations to new and returns true if the something has changed.
 func hostAddressesChanged(oldNode, newNode *kapi.Node) bool {
-	if oldNode == nil {
-		return false
-	}
 	oldAddrs, _ := util.ParseNodeHostAddresses(oldNode)
 	Addrs, _ := util.ParseNodeHostAddresses(newNode)
 	return !oldAddrs.Equal(Addrs)
@@ -1167,27 +1181,18 @@ func hostAddressesChanged(oldNode, newNode *kapi.Node) bool {
 
 // macAddressChanged() compares old annotations to new and returns true if something has changed.
 func macAddressChanged(oldNode, node *kapi.Node) bool {
-	if oldNode == nil {
-		return false
-	}
 	oldMacAddress, _ := util.ParseNodeManagementPortMACAddress(oldNode)
 	macAddress, _ := util.ParseNodeManagementPortMACAddress(node)
 	return !bytes.Equal(oldMacAddress, macAddress)
 }
 
 func nodeSubnetChanged(oldNode, node *kapi.Node) bool {
-	if oldNode == nil {
-		return false
-	}
 	oldSubnets, _ := util.ParseNodeHostSubnetAnnotation(oldNode)
 	newSubnets, _ := util.ParseNodeHostSubnetAnnotation(node)
 	return !reflect.DeepEqual(oldSubnets, newSubnets)
 }
 
 func nodeChassisChanged(oldNode, node *kapi.Node) bool {
-	if oldNode == nil {
-		return false
-	}
 	oldChassis, _ := util.ParseNodeChassisIDAnnotation(oldNode)
 	newChassis, _ := util.ParseNodeChassisIDAnnotation(node)
 	return oldChassis != newChassis

@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -1120,7 +1119,6 @@ func (oc *Controller) allocateNodeSubnets(node *kapi.Node) ([]*net.IPNet, []*net
 }
 
 func (oc *Controller) addNode(node *kapi.Node) ([]*net.IPNet, error) {
-	oc.clearInitialNodeNetworkUnavailableCondition(node, nil)
 	hostSubnets, allocatedSubnets, err := oc.allocateNodeSubnets(node)
 	if err != nil {
 		return nil, err
@@ -1150,9 +1148,6 @@ func (oc *Controller) addNode(node *kapi.Node) ([]*net.IPNet, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// delete stale chassis in SBDB if any
-	oc.deleteStaleNodeChassis(node)
 
 	// If node annotation succeeds and subnets were allocated, update the used subnet count
 	if len(allocatedSubnets) > 0 {
@@ -1299,16 +1294,9 @@ func (oc *Controller) deleteNode(nodeName string, hostSubnets []*net.IPNet) erro
 // TODO: make upstream kubelet more flexible with overlays and GCE so this
 // condition doesn't get added for network plugins that don't want it, and then
 // we can remove this function.
-func (oc *Controller) clearInitialNodeNetworkUnavailableCondition(origNode, newNode *kapi.Node) {
-	if origNode == nil {
-		return
-	}
+func (oc *Controller) clearInitialNodeNetworkUnavailableCondition(newNode *kapi.Node) {
 	// If it is not a Cloud Provider node, then nothing to do.
-	if origNode.Spec.ProviderID == "" {
-		return
-	}
-	// if newNode is not nil, then we are called from UpdateFunc()
-	if newNode != nil && reflect.DeepEqual(origNode.Status.Conditions, newNode.Status.Conditions) {
+	if newNode.Spec.ProviderID == "" {
 		return
 	}
 
@@ -1316,7 +1304,7 @@ func (oc *Controller) clearInitialNodeNetworkUnavailableCondition(origNode, newN
 	resultErr := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		var err error
 
-		oldNode, err := oc.kube.GetNode(origNode.Name)
+		oldNode, err := oc.kube.GetNode(newNode.Name)
 		if err != nil {
 			return err
 		}
@@ -1341,9 +1329,9 @@ func (oc *Controller) clearInitialNodeNetworkUnavailableCondition(origNode, newN
 		return err
 	})
 	if resultErr != nil {
-		klog.Errorf("Status update failed for local node %s: %v", origNode.Name, resultErr)
+		klog.Errorf("Status update failed for local node %s: %v", newNode.Name, resultErr)
 	} else if cleared {
-		klog.Infof("Cleared node NetworkUnavailable/NoRouteCreated condition for %s", origNode.Name)
+		klog.Infof("Cleared node NetworkUnavailable/NoRouteCreated condition for %s", newNode.Name)
 	}
 }
 
@@ -1508,121 +1496,71 @@ func (oc *Controller) syncNodesRetriable(nodes []interface{}) error {
 	return nil
 }
 
-func syncNodeCreate(node *kapi.Node, hostSubnets []*net.IPNet, syncUpdate func(*kapi.Node, []*net.IPNet) error,
-	failedSyncMap *sync.Map) error {
-	var err error
-	if err = syncUpdate(node, hostSubnets); err != nil {
-		if util.IsAnnotationNotSetError(err) {
-			err = nil
-		}
-		failedSyncMap.Store(node.Name, true)
-	}
-	return err
-}
-
-func syncNodeUpdate(node *kapi.Node, hostSubnets []*net.IPNet, syncUpdate func(*kapi.Node, []*net.IPNet) error,
-	failedSyncMap *sync.Map) error {
-	var err error
-	if err = syncUpdate(node, hostSubnets); err != nil {
-		if util.IsAnnotationNotSetError(err) {
-			err = nil
-		}
-		failedSyncMap.Store(node.Name, true)
-	} else {
-		failedSyncMap.Delete(node.Name)
-	}
-	return err
-}
-
-func (oc *Controller) addUpdateNodeEvent(node, oldNode *kapi.Node) error {
+func (oc *Controller) addUpdateNodeEvent(node *kapi.Node, syncNode, syncClusterRouter, syncMgmtPort, syncGw bool) error {
 	var hostSubnets []*net.IPNet
 	var errs []error
 	var err error
 
-	// Check if this an update case
-	if oldNode != nil {
-		shouldUpdate, err := shouldUpdate(node, oldNode)
+	if noHostSubnet := noHostSubnet(node); noHostSubnet {
+		err := oc.lsManager.AddNoHostSubnetNode(node.Name)
 		if err != nil {
 			return err
 		}
-		if !shouldUpdate {
-			// the hostsubnet is not assigned by ovn-kubernetes
-			return nil
-		}
-		klog.Infof("Updating NewNode %q OldNode %q", node.Name, oldNode.Name)
-	} else {
-		// This is creat case
-		if noHostSubnet := noHostSubnet(node); noHostSubnet {
-			err := oc.lsManager.AddNoHostSubnetNode(node.Name)
-			if err != nil {
-				return err
-			}
-		}
-		klog.Infof("Adding Node %q", node.Name)
 	}
 
-	if _, failed := oc.addNodeFailed.Load(node.Name); failed {
+	klog.Infof("Adding Node %q", node.Name)
+	if syncNode {
 		if hostSubnets, err = oc.addNode(node); err != nil {
-			return err
-		}
-		oc.addNodeFailed.Delete(node.Name)
-	} else {
-		if hostSubnets, err = oc.addNode(node); err != nil {
-			klog.Errorf("NodeAdd: error creating subnet for node %s: %v", node.Name, err)
 			oc.addNodeFailed.Store(node.Name, true)
 			oc.nodeClusterRouterPortFailed.Store(node.Name, true)
 			oc.mgmtPortFailed.Store(node.Name, true)
 			oc.gatewaysFailed.Store(node.Name, true)
-			return err
+			return fmt.Errorf("nodeAdd: error creating subnet for node %s: %w", node.Name, err)
 		}
 	}
 
-	if _, failed := oc.nodeClusterRouterPortFailed.Load(node.Name); failed ||
-		nodeChassisChanged(oldNode, node) || nodeSubnetChanged(oldNode, node) {
-		if err := syncNodeUpdate(node, nil, oc.syncNodeClusterRouterPort, &oc.nodeClusterRouterPortFailed); err != nil {
+	if syncClusterRouter {
+		if err = oc.syncNodeClusterRouterPort(node, nil); err != nil {
 			errs = append(errs, err)
-		}
-	} else {
-		if err := syncNodeCreate(node, hostSubnets, oc.syncNodeClusterRouterPort, &oc.nodeClusterRouterPortFailed); err != nil {
-			errs = append(errs, err)
-		}
-	}
-
-	if _, failed := oc.mgmtPortFailed.Load(node.Name); failed ||
-		macAddressChanged(oldNode, node) || nodeSubnetChanged(oldNode, node) {
-		if err := syncNodeUpdate(node, hostSubnets, oc.syncNodeManagementPort, &oc.mgmtPortFailed); err != nil {
-			errs = append(errs, err)
-		}
-	} else {
-		if err := syncNodeCreate(node, hostSubnets, oc.syncNodeManagementPort, &oc.mgmtPortFailed); err != nil {
-			errs = append(errs, err)
-		}
-	}
-
-	if nodeChassisChanged(oldNode, node) {
-		// delete stale chassis in SBDB if any
-		oc.deleteStaleNodeChassis(node)
-	}
-	oc.clearInitialNodeNetworkUnavailableCondition(oldNode, node)
-
-	if _, failed := oc.gatewaysFailed.Load(node.Name); failed ||
-		gatewayChanged(oldNode, node) || nodeSubnetChanged(oldNode, node) ||
-		hostAddressesChanged(oldNode, node) {
-		if err := syncNodeUpdate(node, nil, oc.syncNodeGateway, &oc.gatewaysFailed); err != nil {
-			errs = append(errs, err)
-		}
-	} else {
-		if err := syncNodeCreate(node, hostSubnets, oc.syncNodeGateway, &oc.gatewaysFailed); err != nil {
-			errs = append(errs, err)
-		}
-		// ensure pods that already exist on this node have their logical ports created
-		options := metav1.ListOptions{FieldSelector: fields.OneTermEqualSelector("spec.nodeName", node.Name).String()}
-		if pods, err := oc.client.CoreV1().Pods(metav1.NamespaceAll).List(context.TODO(), options); err != nil {
-			errs = append(errs, err)
+			oc.nodeClusterRouterPortFailed.Store(node.Name, true)
 		} else {
-			oc.addRetryPods(pods.Items)
-			oc.requestRetryPods()
+			oc.nodeClusterRouterPortFailed.Delete(node.Name)
 		}
+	}
+
+	if syncMgmtPort {
+		err := oc.syncNodeManagementPort(node, hostSubnets)
+		if err != nil {
+			errs = append(errs, err)
+			oc.mgmtPortFailed.Store(node.Name, true)
+		} else {
+			oc.mgmtPortFailed.Delete(node.Name)
+		}
+	}
+
+	// delete stale chassis in SBDB if any
+	oc.deleteStaleNodeChassis(node)
+
+	oc.clearInitialNodeNetworkUnavailableCondition(node)
+
+	if syncGw {
+		err := oc.syncNodeGateway(node, nil)
+		if err != nil {
+			errs = append(errs, err)
+			oc.gatewaysFailed.Store(node.Name, true)
+		} else {
+			oc.gatewaysFailed.Delete(node.Name)
+		}
+	}
+
+	// ensure pods that already exist on this node have their logical ports created
+	options := metav1.ListOptions{FieldSelector: fields.OneTermEqualSelector("spec.nodeName", node.Name).String()}
+	pods, err := oc.client.CoreV1().Pods(metav1.NamespaceAll).List(context.TODO(), options)
+	if err != nil {
+		klog.Errorf("Unable to list existing pods on node: %s, existing pods on this node may not function")
+	} else {
+		oc.addRetryPods(pods.Items)
+		oc.requestRetryPods()
 	}
 
 	if len(errs) == 0 {
@@ -1700,7 +1638,11 @@ func (oc *Controller) iterateRetryNodes(updateAll bool) {
 			// create new node if needed
 			if node != nil {
 				klog.Infof("Node Retry: Creating new node for %s", nodeName)
-				if err := oc.addUpdateNodeEvent(node, nil); err != nil {
+				_, nodeSync := oc.addNodeFailed.Load(node.Name)
+				_, clusterRtrSync := oc.nodeClusterRouterPortFailed.Load(node.Name)
+				_, mgmtSync := oc.mgmtPortFailed.Load(node.Name)
+				_, gwSync := oc.gatewaysFailed.Load(node.Name)
+				if err := oc.addUpdateNodeEvent(node, nodeSync, clusterRtrSync, mgmtSync, gwSync); err != nil {
 					klog.Infof("Node Retry create failed for %s, will try again later: %v",
 						nodeName, err)
 					entry.timeStamp = time.Now()
