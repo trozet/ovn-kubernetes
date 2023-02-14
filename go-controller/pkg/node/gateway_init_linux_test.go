@@ -1445,7 +1445,7 @@ var _ = Describe("Gateway unit tests", func() {
 				LinkIndex: 5,
 				Scope:     netlink.SCOPE_UNIVERSE,
 				Gw:        gwIPs[0],
-				MTU:       config.Default.MTU,
+				MTU:       0,
 			}
 			lnk.On("Attrs").Return(lnkAttr)
 			netlinkMock.On("LinkByName", mock.Anything).Return(lnk, nil)
@@ -1480,7 +1480,7 @@ var _ = Describe("Gateway unit tests", func() {
 				LinkIndex: 5,
 				Scope:     netlink.SCOPE_UNIVERSE,
 				Gw:        gwIPs[0],
-				MTU:       config.Default.MTU,
+				MTU:       0,
 			}
 
 			lnk.On("Attrs").Return(lnkAttr)
