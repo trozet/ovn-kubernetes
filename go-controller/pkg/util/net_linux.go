@@ -6,15 +6,12 @@ package util
 import (
 	"bytes"
 	"fmt"
-	"net"
-	"reflect"
-	"strings"
-	"time"
-
-	"github.com/j-keck/arping"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	"net"
+	"reflect"
+	"strings"
 
 	kapi "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
@@ -357,18 +354,6 @@ func LinkNeighAdd(link netlink.Link, neighIP net.IP, neighMAC net.HardwareAddr) 
 		return fmt.Errorf("failed to add neighbour entry %+v: %v", neigh, err)
 	}
 	return nil
-}
-
-func SetARPTimeout() {
-	arping.SetTimeout(50 * time.Millisecond) // hard-coded for now
-}
-
-func GetMACAddressFromARP(neighIP net.IP) (net.HardwareAddr, error) {
-	hwAddr, _, err := arping.Ping(neighIP)
-	if err != nil {
-		return nil, err
-	}
-	return hwAddr, nil
 }
 
 // LinkNeighExists checks to see if the given MAC/IP bindings exists

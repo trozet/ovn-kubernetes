@@ -196,10 +196,6 @@ func (oc *DefaultNetworkController) addPodExternalGWForNamespace(namespace strin
 			pod.Namespace, pod.Name, namespace, err)
 	}
 	nsInfo.routingExternalPodGWs[makePodGWKey(pod)] = egress
-	existingGWs := sets.NewString()
-	for _, gwInfo := range nsInfo.routingExternalPodGWs {
-		existingGWs.Insert(gwInfo.gws.UnsortedList()...)
-	}
 	nsUnlock()
 
 	klog.Infof("Adding routes for external gateway pod: %s, next hops: %q, namespace: %s, bfd-enabled: %t",
@@ -207,10 +203,6 @@ func (oc *DefaultNetworkController) addPodExternalGWForNamespace(namespace strin
 	err = oc.addGWRoutesForNamespace(namespace, egress)
 	if err != nil {
 		return err
-	}
-	// add the exgw podIP to the namespace's k8s.ovn.org/external-gw-pod-ips list
-	if err := util.UpdateExternalGatewayPodIPsAnnotation(oc.kube, namespace, existingGWs.List()); err != nil {
-		klog.Errorf("Unable to update %s/%v annotation for namespace %s: %v", util.ExternalGatewayPodIPsAnnotation, existingGWs, namespace, err)
 	}
 	return nil
 }
@@ -408,10 +400,7 @@ func (oc *DefaultNetworkController) deletePodGWRoutesForNamespace(pod *kapi.Pod,
 		nsUnlock()
 		return fmt.Errorf("failed to delete GW routes for pod %s: %w", pod.Name, err)
 	}
-	// remove the exgw podIP from the namespace's k8s.ovn.org/external-gw-pod-ips list
-	if err := util.UpdateExternalGatewayPodIPsAnnotation(oc.kube, namespace, sets.List(existingGWs)); err != nil {
-		klog.Errorf("Unable to update %s/%v annotation for namespace %s: %v", util.ExternalGatewayPodIPsAnnotation, existingGWs, namespace, err)
-	}
+
 	return nil
 }
 

@@ -115,7 +115,6 @@ type egressNode struct{}
 type egressFwNode struct{}
 
 // types for handlers in use by ovn-k node
-type namespaceExGw struct{}
 type endpointSliceForStaleConntrackRemoval struct{}
 type serviceForGateway struct{}
 type endpointSliceForGateway struct{}
@@ -146,7 +145,6 @@ var (
 	MultiNetworkPolicyType                reflect.Type = reflect.TypeOf(&mnpapi.MultiNetworkPolicy{})
 
 	// Resource types used in ovnk node
-	NamespaceExGwType                         reflect.Type = reflect.TypeOf(&namespaceExGw{})
 	EndpointSliceForStaleConntrackRemovalType reflect.Type = reflect.TypeOf(&endpointSliceForStaleConntrackRemoval{})
 	ServiceForGatewayType                     reflect.Type = reflect.TypeOf(&serviceForGateway{})
 	EndpointSliceForGatewayType               reflect.Type = reflect.TypeOf(&endpointSliceForGateway{})
@@ -553,7 +551,7 @@ func (wf *WatchFactory) GetHandlerPriority(objType reflect.Type) (priority int) 
 func (wf *WatchFactory) GetResourceHandlerFunc(objType reflect.Type) (AddHandlerFuncType, error) {
 	priority := wf.GetHandlerPriority(objType)
 	switch objType {
-	case NamespaceType, NamespaceExGwType:
+	case NamespaceType:
 		return func(namespace string, sel labels.Selector,
 			funcs cache.ResourceEventHandler, processExisting func([]interface{}) error) (*Handler, error) {
 			return wf.AddNamespaceHandler(funcs, processExisting)

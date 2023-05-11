@@ -14,7 +14,6 @@ import (
 	ginkgotable "github.com/onsi/ginkgo/extensions/table"
 	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
@@ -24,10 +23,9 @@ import (
 // This is the image used for the containers acting as externalgateways, built
 // out from the e2e/images/Dockerfile.frr dockerfile
 const (
-	externalContainerImage          = "quay.io/fpaoline/ovnkbfdtest:0.2"
-	srcHTTPPort                     = 80
-	srcUDPPort                      = 90
-	externalGatewayPodIPsAnnotation = "k8s.ovn.org/external-gw-pod-ips"
+	externalContainerImage = "quay.io/fpaoline/ovnkbfdtest:0.2"
+	srcHTTPPort            = 80
+	srcUDPPort             = 90
 )
 
 var externalContainerNetwork = "kind"
@@ -473,30 +471,41 @@ var _ = ginkgo.Describe("e2e multiple external gateway stale conntrack entry del
 		annotateNamespaceForGateway(f.Namespace.Name, false, addresses.gatewayIPs[0])
 
 		ginkgo.By("Check if conntrack entries for ECMP routes are removed for the deleted external gateway if traffic is UDP")
-		podConnEntriesWithMACLabelsSet = pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
-		totalPodConnEntries = pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
+		expectedPodConnEntriesWithMACLabelsSet := 2
+		expectedTotalPodConnEntries := 6
 		if protocol == "udp" {
-			gomega.Expect(podConnEntriesWithMACLabelsSet).To(gomega.Equal(1)) // we still have the conntrack entry for the remaining gateway
-			gomega.Expect(totalPodConnEntries).To(gomega.Equal(5))            // 6-1
-		} else {
-			gomega.Expect(podConnEntriesWithMACLabelsSet).To(gomega.Equal(2))
-			gomega.Expect(totalPodConnEntries).To(gomega.Equal(6))
+			expectedPodConnEntriesWithMACLabelsSet = 1 // we still have the conntrack entry for the remaining gateway
+			expectedTotalPodConnEntries = 5            // 6-1
 		}
+		gomega.Eventually(func() int {
+			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
+		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedPodConnEntriesWithMACLabelsSet),
+			"incorrect pod conntrack entries with MAC labels")
+
+		gomega.Eventually(func() int {
+			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
+		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedTotalPodConnEntries),
+			"incorrect total pod conntrack entries")
 
 		ginkgo.By("Remove first external gateway IP from the app namespace annotation")
 		annotateNamespaceForGateway(f.Namespace.Name, false, "")
 
 		ginkgo.By("Check if conntrack entries for ECMP routes are removed for the deleted external gateway if traffic is UDP")
-		podConnEntriesWithMACLabelsSet = pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
-		totalPodConnEntries = pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
+		expectedPodConnEntriesWithMACLabelsSet = 2
+		expectedTotalPodConnEntries = 6
 		if protocol == "udp" {
-			gomega.Expect(podConnEntriesWithMACLabelsSet).To(gomega.Equal(0)) // we don't have any remaining gateways left
-			gomega.Expect(totalPodConnEntries).To(gomega.Equal(4))            // 6-2
-		} else {
-			gomega.Expect(podConnEntriesWithMACLabelsSet).To(gomega.Equal(2))
-			gomega.Expect(totalPodConnEntries).To(gomega.Equal(6))
+			expectedPodConnEntriesWithMACLabelsSet = 0 // we don't have any remaining gateways left
+			expectedTotalPodConnEntries = 4            // 6-2
 		}
+		gomega.Eventually(func() int {
+			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
+		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedPodConnEntriesWithMACLabelsSet),
+			"incorrect pod conntrack entries with MAC labels")
 
+		gomega.Eventually(func() int {
+			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
+		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedTotalPodConnEntries),
+			"incorrect total pod conntrack entries")
 	},
 		ginkgotable.Entry("IPV4 udp", &addressesv4, "udp"),
 		ginkgotable.Entry("IPV4 tcp", &addressesv4, "tcp"),
@@ -515,14 +524,6 @@ var _ = ginkgo.Describe("e2e multiple external gateway stale conntrack entry del
 			}
 			annotatePodForGateway(gwPod, servingNamespace, f.Namespace.Name, networkIPs, false)
 		}
-
-		// ensure the conntrack deletion tracker annotation is updated
-		ginkgo.By("Check if the k8s.ovn.org/external-gw-pod-ips got updated for the app namespace")
-		err := wait.PollImmediate(retryInterval, retryTimeout, func() (bool, error) {
-			ns := getNamespace(f, f.Namespace.Name)
-			return (ns.Annotations[externalGatewayPodIPsAnnotation] == fmt.Sprintf("%s,%s", addresses.gatewayIPs[0], addresses.gatewayIPs[1])), nil
-		})
-		framework.ExpectNoError(err, "Check if the k8s.ovn.org/external-gw-pod-ips got updated, failed: %v", err)
 
 		setupIperf3Client := func(container, address string, port int) {
 			// note iperf3 even when using udp also spawns tcp connection first; so we indirectly also have the tcp connection when using "-u" flag
@@ -551,46 +552,44 @@ var _ = ginkgo.Describe("e2e multiple external gateway stale conntrack entry del
 		ginkgo.By("Remove second external gateway pod's routing-namespace annotation")
 		annotatePodForGateway(gatewayPodName2, servingNamespace, "", addresses.gatewayIPs[1], false)
 
-		// ensure the conntrack deletion tracker annotation is updated
-		ginkgo.By("Check if the k8s.ovn.org/external-gw-pod-ips got updated for the app namespace")
-		err = wait.PollImmediate(retryInterval, retryTimeout, func() (bool, error) {
-			ns := getNamespace(f, f.Namespace.Name)
-			return (ns.Annotations[externalGatewayPodIPsAnnotation] == fmt.Sprintf("%s", addresses.gatewayIPs[0])), nil
-		})
 		framework.ExpectNoError(err, "Check if the k8s.ovn.org/external-gw-pod-ips got updated, failed: %v", err)
 
 		ginkgo.By("Check if conntrack entries for ECMP routes are removed for the deleted external gateway if traffic is UDP")
-		podConnEntriesWithMACLabelsSet = pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
-		totalPodConnEntries = pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
+		expectedPodConnEntriesWithMACLabelsSet := 2
+		expectedTotalPodConnEntries := 6
 		if protocol == "udp" {
-			gomega.Expect(podConnEntriesWithMACLabelsSet).To(gomega.Equal(1)) // we still have the conntrack entry for the remaining gateway
-			gomega.Expect(totalPodConnEntries).To(gomega.Equal(5))            // 6-1
-		} else {
-			gomega.Expect(podConnEntriesWithMACLabelsSet).To(gomega.Equal(2))
-			gomega.Expect(totalPodConnEntries).To(gomega.Equal(6))
+			expectedPodConnEntriesWithMACLabelsSet = 1 // we still have the conntrack entry for the remaining gateway
+			expectedTotalPodConnEntries = 5            // 6-1
 		}
+		gomega.Eventually(func() int {
+			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
+		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedPodConnEntriesWithMACLabelsSet),
+			"incorrect pod conntrack entries with MAC labels")
+
+		gomega.Eventually(func() int {
+			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
+		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedTotalPodConnEntries),
+			"incorrect total pod conntrack entries")
 
 		ginkgo.By("Remove first external gateway pod's routing-namespace annotation")
 		annotatePodForGateway(gatewayPodName1, servingNamespace, "", addresses.gatewayIPs[0], false)
 
-		// ensure the conntrack deletion tracker annotation is updated
-		ginkgo.By("Check if the k8s.ovn.org/external-gw-pod-ips got updated for the app namespace")
-		err = wait.PollImmediate(retryInterval, retryTimeout, func() (bool, error) {
-			ns := getNamespace(f, f.Namespace.Name)
-			return (ns.Annotations[externalGatewayPodIPsAnnotation] == ""), nil
-		})
-		framework.ExpectNoError(err, "Check if the k8s.ovn.org/external-gw-pod-ips got updated, failed: %v", err)
-
 		ginkgo.By("Check if conntrack entries for ECMP routes are removed for the deleted external gateway if traffic is UDP")
-		podConnEntriesWithMACLabelsSet = pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
-		totalPodConnEntries = pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
+		expectedPodConnEntriesWithMACLabelsSet = 2
+		expectedTotalPodConnEntries = 6
 		if protocol == "udp" {
-			gomega.Expect(podConnEntriesWithMACLabelsSet).To(gomega.Equal(0)) // we don't have any remaining gateways left
-			gomega.Expect(totalPodConnEntries).To(gomega.Equal(4))            // 6-2
-		} else {
-			gomega.Expect(podConnEntriesWithMACLabelsSet).To(gomega.Equal(2))
-			gomega.Expect(totalPodConnEntries).To(gomega.Equal(6))
+			expectedPodConnEntriesWithMACLabelsSet = 0 // we don't have any remaining gateways left
+			expectedTotalPodConnEntries = 4            // 6-2
 		}
+		gomega.Eventually(func() int {
+			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
+		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedPodConnEntriesWithMACLabelsSet),
+			"incorrect pod conntrack entries with MAC labels")
+
+		gomega.Eventually(func() int {
+			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
+		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedTotalPodConnEntries),
+			"incorrect total pod conntrack entries")
 
 	},
 		ginkgotable.Entry("IPV4 udp", &addressesv4, "udp"),
