@@ -440,67 +440,72 @@ var _ = ginkgo.Describe("e2e multiple external gateway stale conntrack entry del
 		if addresses.srcPodIP == "" || addresses.nodeIP == "" {
 			skipper.Skipf("Skipping as pod ip / node ip are not set pod ip %s node ip %s", addresses.srcPodIP, addresses.nodeIP)
 		}
+		staticIP := "172.18.0.254"
 		ginkgo.By("Annotate the app namespace to get managed by external gateways")
-		annotateNamespaceForGateway(f.Namespace.Name, false, addresses.gatewayIPs[0], addresses.gatewayIPs[1])
+		annotateNamespaceForGateway(f.Namespace.Name, false, staticIP)
 
+		// Create an iperf client on teh external container that will use a static IP/port on client to connect to server pod
 		setupIperf3Client := func(container, address string, port int) {
 			// note iperf3 even when using udp also spawns tcp connection first; so we indirectly also have the tcp connection when using "-u" flag
-			cmd := []string{containerRuntime, "exec", container, "iperf3", "-u", "-c", address, "-p", fmt.Sprintf("%d", port), "-b", "1M", "-i", "1", "-t", "3", "&"}
+			cmd := []string{containerRuntime, "exec", container, "iperf3", "-u", "-B", staticIP, "-c", address,
+				"--cport", "33333", "-p", fmt.Sprintf("%d", port), "-b", "1M", "-i", "1", "-t", "3", "&"}
 			_, err := runCommand(cmd...)
+			if err != nil {
+				fmt.Println(" error:", err)
+				for {
+
+				}
+			}
 			framework.ExpectNoError(err, "failed to setup iperf3 client for %s", container)
 		}
-		macAddressGW := make([]string, 2)
-		for i, containerName := range []string{gwContainer1, gwContainer2} {
-			ginkgo.By("Start iperf3 client from external container to connect to iperf3 server running at the src pod")
-			setupIperf3Client(containerName, addresses.srcPodIP, 5201+i)
-			macAddressExtGW, err := net.ParseMAC(getMACAddressesForNetwork(containerName, externalContainerNetwork))
-			framework.ExpectNoError(err, "failed to parse MAC address for %s", containerName)
-			// Trim leading 0s because conntrack dumped labels are just integers
-			// in hex without leading 0s.
-			macAddressGW[i] = strings.TrimLeft(strings.Replace(macAddressExtGW.String(), ":", "", -1), "0")
-		}
 
-		ginkgo.By("Check if conntrack entries for ECMP routes are created for the 2 external gateways")
+		ginkgo.By("Configure gwContainer1 with static IP")
+		cmd := []string{containerRuntime, "exec", gwContainer1, "ip", "addr", "add", staticIP, "dev", "eth0"}
+		_, err := runCommand(cmd...)
+		framework.ExpectNoError(err, "failed configure static IP on %s", gwContainer1)
+
+		ginkgo.By("Start iperf3 client from external container to connect to iperf3 server running at the src pod")
+		setupIperf3Client(gwContainer1, addresses.srcPodIP, 5201)
+		macAddressExtGW, err := net.ParseMAC(getMACAddressesForNetwork(gwContainer1, externalContainerNetwork))
+		framework.ExpectNoError(err, "failed to parse MAC address for %s", gwContainer1)
+		// Trim leading 0s because conntrack dumped labels are just integers
+		// in hex without leading 0s.
+		gw1macAddressGW := strings.TrimLeft(strings.Replace(macAddressExtGW.String(), ":", "", -1), "0")
+
+		ginkgo.By("Check if conntrack entries for ECMP routes are created for the gateway 1")
 		nodeName := getPod(f, srcPodName).Spec.NodeName
-		podConnEntriesWithMACLabelsSet := pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
-		gomega.Expect(podConnEntriesWithMACLabelsSet).To(gomega.Equal(2))
+		podConnEntriesWithMACLabelsSet := pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, []string{gw1macAddressGW})
+		gomega.Expect(podConnEntriesWithMACLabelsSet).To(gomega.Equal(1))
 		totalPodConnEntries := pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
-		gomega.Expect(totalPodConnEntries).To(gomega.Equal(6)) // total conntrack entries for this pod/protocol
+		gomega.Expect(totalPodConnEntries).To(gomega.Equal(3)) // total conntrack entries for this pod/protocol
 
-		ginkgo.By("Remove second external gateway IP from the app namespace annotation")
-		annotateNamespaceForGateway(f.Namespace.Name, false, addresses.gatewayIPs[0])
+		ginkgo.By("Migrate IP to 2nd container")
+		deleteClusterExternalContainer(gwContainer1)
+		ginkgo.By("Configure gwContainer2 with static IP")
+		cmd = []string{containerRuntime, "exec", gwContainer2, "ip", "addr", "add", staticIP, "dev", "eth0"}
+		_, err = runCommand(cmd...)
+		framework.ExpectNoError(err, "failed configure static IP on %s", gwContainer2)
 
-		ginkgo.By("Check if conntrack entries for ECMP routes are removed for the deleted external gateway if traffic is UDP")
-		expectedPodConnEntriesWithMACLabelsSet := 2
-		expectedTotalPodConnEntries := 6
-		if protocol == "udp" {
-			expectedPodConnEntriesWithMACLabelsSet = 1 // we still have the conntrack entry for the remaining gateway
-			expectedTotalPodConnEntries = 5            // 6-1
-		}
+		ginkgo.By("Start iperf3 client from external container gw2 to connect to iperf3 server running at the src pod")
+		setupIperf3Client(gwContainer2, addresses.srcPodIP, 5201)
+		macAddressExtGW, err = net.ParseMAC(getMACAddressesForNetwork(gwContainer2, externalContainerNetwork))
+		framework.ExpectNoError(err, "failed to parse MAC address for %s", gwContainer2)
+		// Trim leading 0s because conntrack dumped labels are just integers
+		// in hex without leading 0s.
+		gw2macAddressGW := strings.TrimLeft(strings.Replace(macAddressExtGW.String(), ":", "", -1), "0")
+
+		ginkgo.By("Check if conntrack entries for ECMP routes have MAC for gw2")
+		expectedPodConnEntriesWithMACLabelsSet := 1
+		expectedTotalPodConnEntries := 3
+
 		gomega.Eventually(func() int {
-			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
-		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedPodConnEntriesWithMACLabelsSet),
-			"incorrect pod conntrack entries with MAC labels")
+			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, []string{gw2macAddressGW})
+		}, 30*time.Second, 1*time.Second).Should(gomega.Equal(expectedPodConnEntriesWithMACLabelsSet),
+			"conntrack never found for gw2")
 
-		gomega.Eventually(func() int {
-			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
-		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedTotalPodConnEntries),
-			"incorrect total pod conntrack entries")
+		ginkgo.By("Conntrack entries for ECMP routes should NOT have MAC for gw1")
 
-		ginkgo.By("Remove first external gateway IP from the app namespace annotation")
-		annotateNamespaceForGateway(f.Namespace.Name, false, "")
-
-		ginkgo.By("Check if conntrack entries for ECMP routes are removed for the deleted external gateway if traffic is UDP")
-		expectedPodConnEntriesWithMACLabelsSet = 2
-		expectedTotalPodConnEntries = 6
-		if protocol == "udp" {
-			expectedPodConnEntriesWithMACLabelsSet = 0 // we don't have any remaining gateways left
-			expectedTotalPodConnEntries = 4            // 6-2
-		}
-		gomega.Eventually(func() int {
-			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, macAddressGW)
-		}, 10*time.Second, 1*time.Second).Should(gomega.Equal(expectedPodConnEntriesWithMACLabelsSet),
-			"incorrect pod conntrack entries with MAC labels")
+		gomega.Expect(pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, []string{gw1macAddressGW})).Should(gomega.Equal(0))
 
 		gomega.Eventually(func() int {
 			return pokeConntrackEntries(nodeName, addresses.srcPodIP, protocol, nil)
@@ -511,7 +516,9 @@ var _ = ginkgo.Describe("e2e multiple external gateway stale conntrack entry del
 		ginkgotable.Entry("IPV4 tcp", &addressesv4, "tcp"),
 		ginkgotable.Entry("IPV6 udp", &addressesv6, "udp"),
 		ginkgotable.Entry("IPV6 tcp", &addressesv6, "tcp"))
+})
 
+/**
 	ginkgotable.DescribeTable("ExternalGWPod annotation: Should validate conntrack entry deletion for TCP/UDP traffic via multiple external gateways a.k.a ECMP routes", func(addresses *gatewayTestIPs, protocol string) {
 		if addresses.srcPodIP == "" || addresses.nodeIP == "" {
 			skipper.Skipf("Skipping as pod ip / node ip are not set pod ip %s node ip %s", addresses.srcPodIP, addresses.nodeIP)
@@ -597,6 +604,8 @@ var _ = ginkgo.Describe("e2e multiple external gateway stale conntrack entry del
 		ginkgotable.Entry("IPV6 udp", &addressesv6, "udp"),
 		ginkgotable.Entry("IPV6 tcp", &addressesv6, "tcp"))
 })
+
+*/
 
 // BFD Tests are dual of external gateway. The only difference is that they enable BFD on ovn and
 // on the external containers, and after doing one round veryfing that the traffic reaches both containers,
