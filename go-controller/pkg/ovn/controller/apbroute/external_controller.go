@@ -2,6 +2,7 @@ package apbroute
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	adminpolicybasedrouteapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
@@ -16,6 +17,14 @@ import (
 )
 
 type gatewayInfoList []*gatewayInfo
+
+func (g gatewayInfoList) String() string {
+	ret := []string{}
+	for _, i := range g {
+		ret = append(ret, i.String())
+	}
+	return strings.Join(ret, ", ")
+}
 
 // HasBFDEnabled returns the BFD value for the given IP stored in the gatewayInfoList when found.
 // It also returns a boolean that indicates if the IP was found and an error
@@ -82,6 +91,10 @@ type gatewayInfo struct {
 	BFDEnabled bool
 }
 
+func (g *gatewayInfo) String() string {
+	return fmt.Sprintf("BFDEnabled: %t, Gateways: %+v", g.BFDEnabled, g.Gateways.items)
+}
+
 func newGatewayInfo(items sets.Set[string], bfdEnabled bool) *gatewayInfo {
 	return &gatewayInfo{Gateways: &syncSet{items: items, mux: &sync.Mutex{}}, BFDEnabled: bfdEnabled}
 }
@@ -93,16 +106,7 @@ type syncSet struct {
 
 // Equal compares two gatewayInfo instances and returns true if all the gateway IPs are equal, regardless of the order, as well as the BFDEnabled field value.
 func (g *gatewayInfo) Equal(g2 *gatewayInfo) bool {
-	return g.BFDEnabled == g2.BFDEnabled && g.Gateways.Equal(g2.Gateways)
-}
-
-func (g *syncSet) Equal(s2 *syncSet) bool {
-	s2.mux.Lock()
-	s2items := s2.items.Clone()
-	s2.mux.Unlock()
-	g.mux.Lock()
-	defer g.mux.Unlock()
-	return g.items.Equal(s2items)
+	return g.BFDEnabled == g2.BFDEnabled && len(g.Gateways.Difference(g2.Gateways.items.Clone())) == 0
 }
 
 func (g *syncSet) Has(ip string) bool {
@@ -145,7 +149,7 @@ type namespaceInfo struct {
 	Policies        sets.Set[string]
 	StaticGateways  gatewayInfoList
 	DynamicGateways map[ktypes.NamespacedName]*gatewayInfo
-	markForDelete   bool
+	markForDeletion bool
 }
 
 func newNamespaceInfo() *namespaceInfo {
@@ -157,8 +161,8 @@ func newNamespaceInfo() *namespaceInfo {
 }
 
 type routeInfo struct {
-	policy          *adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute
-	markedForDelete bool
+	policy            *adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute
+	markedForDeletion bool
 }
 
 type ExternalRouteInfo struct {
@@ -238,19 +242,20 @@ func (m *externalPolicyManager) isRoutePolicyCachePopulated() bool {
 }
 
 // getRoutePolicyFromCache retrieves the cached value of the policy if it exists in the cache, as well as locking the key in case it exists.
-func (m *externalPolicyManager) getRoutePolicyFromCache(policyName string) (adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute, bool, bool) {
+func (m *externalPolicyManager) getRoutePolicyFromCache(policyName string) (*adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute, bool, bool) {
 	var (
-		policy                   adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute
+		policy                   *adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute
 		found, markedForDeletion bool
 	)
 	_ = m.routePolicySyncCache.DoWithLock(policyName, func(policyName string) error {
+		klog.Infof("Getting route %s", policyName)
 		ri, f := m.routePolicySyncCache.Load(policyName)
 		if !f {
 			return nil
 		}
 		found = f
-		policy = *ri.policy
-		markedForDeletion = ri.markedForDelete
+		markedForDeletion = ri.markedForDeletion
+		policy = ri.policy.DeepCopy()
 		return nil
 	})
 	return policy, found, markedForDeletion
@@ -263,7 +268,7 @@ func (m *externalPolicyManager) storeRoutePolicyInCache(policyInfo *adminpolicyb
 			m.routePolicySyncCache.LoadOrStore(policyName, &routeInfo{policy: policyInfo})
 			return nil
 		}
-		if ri.markedForDelete {
+		if ri.markedForDeletion {
 			return fmt.Errorf("attempting to store policy %s that is in the process of being deleted", policyInfo.Name)
 		}
 		ri.policy = policyInfo
@@ -274,7 +279,7 @@ func (m *externalPolicyManager) storeRoutePolicyInCache(policyInfo *adminpolicyb
 func (m *externalPolicyManager) deleteRoutePolicyFromCache(policyName string) error {
 	return m.routePolicySyncCache.DoWithLock(policyName, func(policyName string) error {
 		ri, found := m.routePolicySyncCache.Load(policyName)
-		if found && !ri.markedForDelete {
+		if found && !ri.markedForDeletion {
 			return fmt.Errorf("attempting to delete route policy %s from cache before it has been marked for deletion", policyName)
 		}
 		m.routePolicySyncCache.Delete(policyName)
@@ -294,7 +299,7 @@ func (m *externalPolicyManager) getAndMarkRoutePolicyForDeletionInCache(policyNa
 		if !found {
 			return nil
 		}
-		ri.markedForDelete = true
+		ri.markedForDeletion = true
 		exists = true
 		routePolicy = *ri.policy
 		return nil
@@ -312,12 +317,16 @@ func (m *externalPolicyManager) getNamespaceInfoFromCache(namespaceName string) 
 	return nsInfo, true
 }
 
+func (m *externalPolicyManager) getAllNamespacesNamesInCache() []string {
+	return m.namespaceInfoSyncCache.GetKeys()
+}
+
 func (m *externalPolicyManager) getAndMarkForDeleteNamespaceInfoFromCache(namespaceName string) (*namespaceInfo, bool) {
 	nsInfo, ok := m.getNamespaceInfoFromCache(namespaceName)
 	if !ok {
 		return nil, false
 	}
-	nsInfo.markForDelete = true
+	nsInfo.markForDeletion = true
 	return nsInfo, ok
 }
 
@@ -327,7 +336,7 @@ func (m *externalPolicyManager) deleteNamespaceInfoInCache(namespaceName string)
 		klog.Warningf("Failed to retrieve namespace %s for deletion", namespaceName)
 		return
 	}
-	if !nsInfo.markForDelete {
+	if !nsInfo.markForDeletion {
 		klog.Warningf("Attempting to delete namespace %s when it has not been marked for deletion", namespaceName)
 		return
 	}
@@ -357,12 +366,15 @@ func (m *externalPolicyManager) getAllRoutePolicies() ([]*adminpolicybasedroutea
 	if m.isRoutePolicyCachePopulated() {
 		keys := m.routePolicySyncCache.GetKeys()
 		for _, policyName := range keys {
-			rp, found, markedForDelete := m.getRoutePolicyFromCache(policyName)
-			// ignore route policies that have been marked for deletion. They will soon be parted from this cluster.
-			if !found || (found && markedForDelete) {
+			rp, found, markedForDeletion := m.getRoutePolicyFromCache(policyName)
+			if !found {
+				return nil, fmt.Errorf("failed to find external route policy %s in cache", policyName)
+			}
+			if markedForDeletion {
+				klog.Infof("Skipping route policy %s as it has been marked for deletion", policyName)
 				continue
 			}
-			routePolicies = append(routePolicies, &rp)
+			routePolicies = append(routePolicies, rp)
 		}
 		return routePolicies, nil
 	}
