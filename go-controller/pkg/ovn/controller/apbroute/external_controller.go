@@ -149,7 +149,6 @@ type namespaceInfo struct {
 	Policies        sets.Set[string]
 	StaticGateways  gatewayInfoList
 	DynamicGateways map[ktypes.NamespacedName]*gatewayInfo
-	markForDeletion bool
 }
 
 func newNamespaceInfo() *namespaceInfo {
@@ -319,28 +318,6 @@ func (m *externalPolicyManager) getNamespaceInfoFromCache(namespaceName string) 
 
 func (m *externalPolicyManager) getAllNamespacesNamesInCache() []string {
 	return m.namespaceInfoSyncCache.GetKeys()
-}
-
-func (m *externalPolicyManager) getAndMarkForDeleteNamespaceInfoFromCache(namespaceName string) (*namespaceInfo, bool) {
-	nsInfo, ok := m.getNamespaceInfoFromCache(namespaceName)
-	if !ok {
-		return nil, false
-	}
-	nsInfo.markForDeletion = true
-	return nsInfo, ok
-}
-
-func (m *externalPolicyManager) deleteNamespaceInfoInCache(namespaceName string) {
-	nsInfo, ok := m.namespaceInfoSyncCache.Load(namespaceName)
-	if !ok {
-		klog.Warningf("Failed to retrieve namespace %s for deletion", namespaceName)
-		return
-	}
-	if !nsInfo.markForDeletion {
-		klog.Warningf("Attempting to delete namespace %s when it has not been marked for deletion", namespaceName)
-		return
-	}
-	m.namespaceInfoSyncCache.Delete(namespaceName)
 }
 
 func (m *externalPolicyManager) unlockNamespaceInfoCache(namespaceName string) {

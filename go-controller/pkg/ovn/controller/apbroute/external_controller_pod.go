@@ -18,47 +18,24 @@ import (
 	utilnet "k8s.io/utils/net"
 )
 
-func (m *externalPolicyManager) syncPod(pod *v1.Pod, podLister corev1listers.PodLister, namespaceLister corev1listers.NamespaceLister, routeQueue, namespaceQueue workqueue.RateLimitingInterface) error {
+func (m *externalPolicyManager) syncPod(pod *v1.Pod, podLister corev1listers.PodLister, routeQueue workqueue.RateLimitingInterface) error {
 
 	_, err := podLister.Pods(pod.Namespace).Get(pod.Name)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
+
+	// Only queues policies affected by gateway pods
 	policies, pErr := m.listPoliciesInNamespacesUsingPodGateway(ktypes.NamespacedName{Namespace: pod.Namespace, Name: pod.Name})
 	if pErr != nil {
 		return pErr
 	}
-	klog.Infof("Processing pod %s/%s with matching policies %+v", pod.Namespace, pod.Name, policies.UnsortedList())
-	if apierrors.IsNotFound(err) || !pod.DeletionTimestamp.IsZero() {
-		// DELETE case
-		klog.Infof("Deleting pod %s/%s", pod.Namespace, pod.Name)
-		nsInfo, found := m.getNamespaceInfoFromCache(pod.Namespace)
-		if found {
-			markedForDeletion := nsInfo.markForDeletion
-			m.unlockNamespaceInfoCache(pod.Namespace)
-			if markedForDeletion {
-				ns, err := namespaceLister.Get(pod.Namespace)
-				if err != nil {
-					return err
-				}
-				namespaceQueue.Add(ns)
-			}
-		}
-	} else {
-		// ADD or UPDATE case
-		klog.Infof("Adding or Updating pod gateway %s/%s", pod.Namespace, pod.Name)
-	}
+	klog.Infof("Processing gateway pod %s/%s with matching policies %+v", pod.Namespace, pod.Name, policies.UnsortedList())
 	for policyName := range policies {
-		p, found, markedForDeletion := m.getRoutePolicyFromCache(policyName)
-		if !found {
-			return fmt.Errorf("failed to find external route policy %s in cache", policyName)
-		}
-		if markedForDeletion {
-			klog.Infof("Skipping route policy %s as it has been marked for deletion", policyName)
-			continue
-		}
-		routeQueue.Add(p)
+		klog.V(2).InfoS("Queueing policy %s", policyName)
+		routeQueue.Add(policyName)
 	}
+
 	return nil
 }
 

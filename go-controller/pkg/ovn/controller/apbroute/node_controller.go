@@ -227,25 +227,25 @@ func (c *ExternalGatewayNodeController) processNextPolicyWorkItem(wg *sync.WaitG
 	wg.Add(1)
 	defer wg.Done()
 
-	obj, shutdown := c.routeQueue.Get()
+	key, shutdown := c.routeQueue.Get()
 	if shutdown {
 		return false
 	}
-	defer c.routeQueue.Done(obj)
+	defer c.routeQueue.Done(key)
 
-	item := obj.(*adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute)
-	klog.Infof("Processing policy %s", item.Name)
-	err := c.mgr.syncRoutePolicy(item, c.routeLister, c.routeQueue)
+	item := key.(string)
+	klog.Infof("Processing policy %s", key)
+	_, err := c.mgr.syncRoutePolicy(key.(string), c.routeQueue)
 	if err != nil {
 		if c.routeQueue.NumRequeues(item) < maxRetries {
-			klog.V(2).InfoS("Error found while processing policy: %v", err.Error())
+			klog.V(2).InfoS("Error found while processing policy: %s, error: %v", key, err.Error())
 			c.routeQueue.AddRateLimited(item)
 			return true
 		}
-		klog.Warningf("Dropping policy %q out of the queue: %v", item.Name, err)
+		klog.Warningf("Dropping policy %q out of the queue: %v", key, err)
 		utilruntime.HandleError(err)
 	}
-	c.routeQueue.Forget(obj)
+	c.routeQueue.Forget(key)
 	return true
 }
 
@@ -284,7 +284,7 @@ func (c *ExternalGatewayNodeController) processNextNamespaceWorkItem(wg *sync.Wa
 	}
 	defer c.namespaceQueue.Done(obj)
 
-	err := c.mgr.syncNamespace(obj.(*v1.Namespace), c.namespaceLister, c.routeQueue)
+	err := c.mgr.syncNamespace(obj.(*v1.Namespace), c.routeQueue)
 	if err != nil {
 		if c.namespaceQueue.NumRequeues(obj) < maxRetries {
 			klog.V(2).InfoS("Error found while processing namespace %s:%w", obj.(*v1.Namespace), err)
@@ -340,7 +340,7 @@ func (c *ExternalGatewayNodeController) processNextPodWorkItem(wg *sync.WaitGrou
 	defer c.podQueue.Done(obj)
 
 	p := obj.(*v1.Pod)
-	err := c.mgr.syncPod(p, c.podLister, c.namespaceLister, c.routeQueue, c.namespaceQueue)
+	err := c.mgr.syncPod(p, c.podLister, c.routeQueue)
 	if err != nil {
 		if c.podQueue.NumRequeues(obj) < maxRetries {
 			klog.V(2).InfoS("Error found while processing pod %s/%s:%w", p.Namespace, p.Name, err)

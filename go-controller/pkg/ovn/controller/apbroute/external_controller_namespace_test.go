@@ -100,7 +100,6 @@ func listNamespaceInfo() []string {
 func deepCopyNamespaceInfo(source, destination *namespaceInfo) {
 	destination.Policies = sets.New(source.Policies.UnsortedList()...)
 	destination.StaticGateways = gatewayInfoList{}
-	destination.markForDeletion = source.markForDeletion
 	for _, gwInfo := range source.StaticGateways {
 		destination.StaticGateways, _, err = destination.StaticGateways.Insert(&gatewayInfo{
 			Gateways: &syncSet{
@@ -311,7 +310,6 @@ var _ = Describe("OVN External Gateway namespace", func() {
 			Eventually(func() []string { return listNamespaceInfo() }, 5).Should(HaveLen(1))
 			Eventually(func() bool { return len(getNamespaceInfo(namespaceTest.Name).DynamicGateways) > 0 }, 5).Should(BeTrue())
 			deleteNamespace(namespaceTest.Name, fakeClient)
-			Eventually(func() bool { return getNamespaceInfo(namespaceTest.Name).markForDeletion }, 5).Should(BeTrue())
 			deletePod(targetPod, fakeClient)
 			Eventually(func() []string { return listNamespaceInfo() }, 5).Should(HaveLen(0))
 		})
@@ -329,20 +327,11 @@ var _ = Describe("OVN External Gateway namespace", func() {
 			Eventually(func() bool { return len(getNamespaceInfo(namespaceTest.Name).DynamicGateways) > 0 }, 5).Should(BeTrue())
 			By("delete the namespace whilst a pod still remains")
 			deleteNamespace(namespaceTest.Name, fakeClient)
-			Eventually(func() bool { return getNamespaceInfo(namespaceTest.Name).markForDeletion }, 5).Should(BeTrue())
 			By("create the namespace test again while it is being deleted")
 			createNamespace(namespaceTest)
 			By("delete the remaining pod in the namespace to proceed on deleting the namespace itself")
 			deletePod(targetPod, fakeClient)
 			Eventually(func() []string { return listNamespaceInfo() }, time.Hour).Should(HaveLen(1))
-			// The new namespace should not be marked for deletion and should contain the same dynamic gateways
-			Eventually(func() bool {
-				nsInfo := getNamespaceInfo(namespaceTest.Name)
-				if nsInfo != nil {
-					return nsInfo.markForDeletion
-				}
-				return true
-			}, time.Hour).Should(BeFalse())
 			Eventually(func() int {
 				nsInfo := getNamespaceInfo(namespaceTest.Name)
 				return len(nsInfo.DynamicGateways)
@@ -388,8 +377,7 @@ var _ = Describe("OVN External Gateway namespace", func() {
 						DynamicGateways: make(map[ktypes.NamespacedName]*gatewayInfo)},
 					cmpOpts...))
 			updateNamespaceLabel(namespaceTest.Name, dynamicPolicyTest2.Spec.From.NamespaceSelector.MatchLabels, fakeClient)
-			Eventually(func() []string { return listNamespaceInfo() }, 5).Should(HaveLen(1))
-			Eventually(func() *namespaceInfo { return getNamespaceInfo(namespaceTest.Name) }, 5).Should(Equal(newNamespaceInfo()))
+			Eventually(func() []string { return listNamespaceInfo() }, 5).Should(HaveLen(0))
 		})
 
 		It("validates that a namespace changes its policies when its labels are changed to match a different policy, resulting in the later on being the only policy applied to the namespace", func() {

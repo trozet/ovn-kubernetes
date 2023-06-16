@@ -239,37 +239,43 @@ func (c *ExternalGatewayMasterController) processNextPolicyWorkItem(wg *sync.Wai
 	wg.Add(1)
 	defer wg.Done()
 
-	obj, shutdown := c.routeQueue.Get()
+	key, shutdown := c.routeQueue.Get()
 
 	if shutdown {
 		return false
 	}
 
-	defer c.routeQueue.Done(obj)
+	defer c.routeQueue.Done(key)
 
-	item, ok := obj.(*adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute)
-	if !ok {
-		klog.Errorf("Invalid type %T", obj)
-	}
-	klog.Infof("Processing policy %s", item.Name)
-	err := c.mgr.syncRoutePolicy(item, c.routeLister, c.routeQueue)
-	// capture the error from processing the sync in the statuses message field
-	err = c.updateStatusAPBExternalRoute(item, err)
+	klog.Infof("Processing policy %s", key)
+	policy, err := c.mgr.syncRoutePolicy(key.(string), c.routeQueue)
 	if err != nil {
-		if c.routeQueue.NumRequeues(item) < maxRetries {
+		klog.Errorf("Failed to sync APB policy %s: %v", key, err)
+	}
+	// capture the error from processing the sync in the statuses message field
+	err = c.updateStatusAPBExternalRoute(policy, err)
+	if err != nil {
+		if c.routeQueue.NumRequeues(key) < maxRetries {
 			klog.V(2).InfoS("Error found while processing policy: %w", err)
-			c.routeQueue.AddRateLimited(item)
+			c.routeQueue.AddRateLimited(key)
 			return true
 		}
-		klog.Warningf("Dropping policy %q out of the queue: %w", item.Name, err)
+		klog.Warningf("Dropping policy %q out of the queue: %w", key, err)
 		utilruntime.HandleError(err)
 	}
-	c.routeQueue.Forget(obj)
+	c.routeQueue.Forget(key)
 	return true
 }
 
 func (c *ExternalGatewayMasterController) onPolicyAdd(obj interface{}) {
-	c.routeQueue.Add(obj)
+	key, err := cache.MetaNamespaceKeyFunc(obj)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", obj, err))
+		return
+	}
+	_ = obj.(*adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute)
+	klog.V(4).Infof("Adding policy %s", key)
+	c.routeQueue.Add(key)
 }
 
 func (c *ExternalGatewayMasterController) onPolicyUpdate(oldObj, newObj interface{}) {
@@ -281,11 +287,20 @@ func (c *ExternalGatewayMasterController) onPolicyUpdate(oldObj, newObj interfac
 		return
 	}
 
-	c.routeQueue.Add(newObj)
+	key, err := cache.MetaNamespaceKeyFunc(newObj)
+	if err == nil {
+		c.routeQueue.Add(key)
+	}
 }
 
 func (c *ExternalGatewayMasterController) onPolicyDelete(obj interface{}) {
-	c.routeQueue.Add(obj)
+	key, err := cache.MetaNamespaceKeyFunc(obj)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %+v: %v", obj, err))
+		return
+	}
+	_ = obj.(*adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute)
+	c.routeQueue.Add(key)
 }
 
 func (c *ExternalGatewayMasterController) onNamespaceAdd(obj interface{}) {
@@ -324,7 +339,7 @@ func (c *ExternalGatewayMasterController) processNextNamespaceWorkItem(wg *sync.
 
 	defer c.namespaceQueue.Done(obj)
 
-	err := c.mgr.syncNamespace(obj.(*v1.Namespace), c.namespaceLister, c.routeQueue)
+	err := c.mgr.syncNamespace(obj.(*v1.Namespace), c.routeQueue)
 	if err != nil {
 		if c.namespaceQueue.NumRequeues(obj) < maxRetries {
 			klog.V(2).InfoS("Error found while processing namespace %s:%w", obj.(*v1.Namespace), err)
@@ -381,7 +396,7 @@ func (c *ExternalGatewayMasterController) processNextPodWorkItem(wg *sync.WaitGr
 	defer c.podQueue.Done(obj)
 
 	p := obj.(*v1.Pod)
-	err := c.mgr.syncPod(p, c.podLister, c.namespaceLister, c.routeQueue, c.namespaceQueue)
+	err := c.mgr.syncPod(p, c.podLister, c.routeQueue)
 	if err != nil {
 		if c.podQueue.NumRequeues(obj) < maxRetries {
 			klog.V(2).InfoS("Error found while processing pod %s/%s:%w", p.Namespace, p.Name, err)
@@ -398,6 +413,10 @@ func (c *ExternalGatewayMasterController) processNextPodWorkItem(wg *sync.WaitGr
 
 // updateStatusAPBExternalRoute updates the CR with the current status of the CR instance, including errors captured while processing the CR during its lifetime
 func (c *ExternalGatewayMasterController) updateStatusAPBExternalRoute(externalRoutePolicy *adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute, processedError error) error {
+	if externalRoutePolicy == nil {
+		// policy doesnt exist anymore, nothing to do
+		return nil
+	}
 
 	processedPolicy, err := c.mgr.processExternalRoutePolicy(externalRoutePolicy)
 	if err != nil {

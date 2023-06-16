@@ -2,13 +2,12 @@ package apbroute
 
 import (
 	"context"
-	"time"
-
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -299,11 +298,11 @@ var _ = Describe("OVN External Gateway policy", func() {
 			Eventually(func() []string { return listRoutePolicyInCache() }, 5).Should(HaveLen(2))
 			Eventually(func() []string { return listNamespaceInfo() }, 5).Should(HaveLen(1))
 			deletePolicy(staticPolicy.Name, fakeRouteClient)
-			Eventually(func() []string { return listRoutePolicyInCache() }, time.Hour, 1).Should(HaveLen(1))
+			Eventually(func() []string { return listRoutePolicyInCache() }, 5, 1).Should(HaveLen(1))
 
 			Eventually(func() *namespaceInfo {
 				return getNamespaceInfo(namespaceTest.Name)
-			}, time.Hour, time.Hour).Should(BeComparableTo(
+			}, 5).Should(BeComparableTo(
 				&namespaceInfo{
 					Policies:       sets.New(dynamicPolicy.Name),
 					StaticGateways: gatewayInfoList{},
@@ -369,6 +368,7 @@ var _ = Describe("OVN External Gateway policy", func() {
 			p.Spec.From.NamespaceSelector = v1.LabelSelector{MatchLabels: namespaceTest2.Labels}
 			p.Generation++
 			lastUpdate := p.Status.LastTransitionTime
+			klog.Info("TROZET BEFORE UPDATE")
 			_, err = fakeRouteClient.K8sV1().AdminPolicyBasedExternalRoutes().Update(context.Background(), p, v1.UpdateOptions{})
 			Expect(err).NotTo(HaveOccurred())
 			Eventually(func() v1.Time {
@@ -376,9 +376,7 @@ var _ = Describe("OVN External Gateway policy", func() {
 				Expect(err).NotTo(HaveOccurred())
 				return p.Status.LastTransitionTime
 			}).Should(Not(Equal(lastUpdate)))
-			Eventually(func() []string { return listNamespaceInfo() }, 5).Should(HaveLen(2))
-			Eventually(func() *namespaceInfo { return getNamespaceInfo(namespaceTest.Name) }, 5).Should(Equal(newNamespaceInfo()))
-
+			Eventually(func() []string { return listNamespaceInfo() }, 5).Should(HaveLen(1))
 			Eventually(func() *namespaceInfo {
 				return getNamespaceInfo(namespaceTest2.Name)
 			}, 5).Should(BeComparableTo(expected, cmpOpts...))
