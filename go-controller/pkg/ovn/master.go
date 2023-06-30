@@ -899,12 +899,14 @@ func (oc *DefaultNetworkController) addUpdateRemoteNodeEvent(node *kapi.Node, sy
 	// from the local zone cache.
 	_, present := oc.localZoneNodes.Load(node.Name)
 
+	var isMigrate bool
 	if present {
 		klog.Infof("Node %q moved from the local zone %s to a remote zone %s. Cleaning the node resources", node.Name, oc.zone, util.GetNodeZone(node))
-		if err := oc.cleanupNodeResources(node.Name); err != nil {
+		if ops, err := oc.cleanupNodeResources(node.Name); err != nil {
 			return fmt.Errorf("error cleaning up the local resources for the remote node %s, err : %w", node.Name, err)
 		}
 		oc.localZoneNodes.Delete(node.Name)
+		isMigrate = true
 	}
 
 	var err error
@@ -912,7 +914,7 @@ func (oc *DefaultNetworkController) addUpdateRemoteNodeEvent(node *kapi.Node, sy
 		// Call zone chassis handler's AddRemoteZoneNode function to creates
 		// the remote chassis for the remote zone node in the SB DB or mark
 		// the entry as remote if it was local chassis earlier
-		if err = oc.zoneChassisHandler.AddRemoteZoneNode(node); err != nil {
+		if ops, err = oc.zoneChassisHandler.AddRemoteZoneNode(node); err != nil {
 			err = fmt.Errorf("adding or updating remote node %s failed, err - %w", node.Name, err)
 			oc.syncZoneICFailed.Store(node.Name, true)
 		} else {
@@ -926,6 +928,11 @@ func (oc *DefaultNetworkController) addUpdateRemoteNodeEvent(node *kapi.Node, sy
 			}
 		}
 	}
+	if isMigrate {
+		// set global-migration annotation
+		// wait for annotations (remote and global)
+	}
+	libovsdbops.TransactAndCheck(c, ops)
 
 	return err
 }
