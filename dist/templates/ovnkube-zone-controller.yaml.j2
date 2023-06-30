@@ -41,10 +41,6 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
-                  - key: node-role.kubernetes.io/zone-controller
-                    operator: In
-                    values:
-                      - ""
                   - key: kubernetes.io/os
                     operator: In
                     values:
