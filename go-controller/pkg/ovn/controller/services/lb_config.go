@@ -472,6 +472,8 @@ func buildTemplateLBs(service *v1.Service, configs []lbConfig, nodes []nodeInfo,
 					Groups:      []string{types.ClusterSwitchLBGroupName},
 					Rules:       switchV4Rules,
 					Templates:   getTemplatesFromRulesTargets(switchV4Rules),
+					Switches:    []string{},
+					Routers:     []string{},
 				})
 			}
 			if len(routerV4Rules) > 0 {
@@ -483,6 +485,8 @@ func buildTemplateLBs(service *v1.Service, configs []lbConfig, nodes []nodeInfo,
 					Groups:      []string{types.ClusterRouterLBGroupName},
 					Rules:       routerV4Rules,
 					Templates:   getTemplatesFromRulesTargets(routerV4Rules),
+					Switches:    []string{},
+					Routers:     []string{},
 				})
 			}
 		}
@@ -497,6 +501,8 @@ func buildTemplateLBs(service *v1.Service, configs []lbConfig, nodes []nodeInfo,
 					Groups:      []string{types.ClusterSwitchLBGroupName},
 					Rules:       switchV6Rules,
 					Templates:   getTemplatesFromRulesTargets(switchV6Rules),
+					Switches:    []string{},
+					Routers:     []string{},
 				})
 			}
 			if len(routerV6Rules) > 0 {
@@ -508,6 +514,8 @@ func buildTemplateLBs(service *v1.Service, configs []lbConfig, nodes []nodeInfo,
 					Groups:      []string{types.ClusterRouterLBGroupName},
 					Rules:       routerV6Rules,
 					Templates:   getTemplatesFromRulesTargets(routerV6Rules),
+					Switches:    []string{},
+					Routers:     []string{},
 				})
 			}
 		}

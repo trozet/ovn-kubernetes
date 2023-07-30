@@ -109,6 +109,10 @@ func getLoadBalancerTemplates(lb *nbdb.LoadBalancer, allTemplates TemplateMap) T
 			}
 		}
 	}
+
+	if len(result) == 0 {
+		return nil
+	}
 	return result
 }
 
@@ -207,6 +211,9 @@ func getTemplatesFromRulesTargets(rules []LBRule) TemplateMap {
 		}
 		// No need to return source templates, those are managed in the
 		// node-tracker.
+	}
+	if len(templates) == 0 {
+		return nil
 	}
 	return templates
 }

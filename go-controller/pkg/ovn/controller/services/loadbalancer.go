@@ -3,6 +3,7 @@ package services
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -315,12 +316,19 @@ func LoadBalancersEqualNoUUID(lbs1, lbs2 []LB) bool {
 	for _, lb := range lbs1 {
 		lb.UUID = ""
 		new1 = append(new1, lb)
+		for k, v := range lb.Templates {
+			klog.Info("TROZET new1 %v:%#v", k, *v)
+		}
 
 	}
 	for _, lb := range lbs2 {
 		lb.UUID = ""
 		new2 = append(new2, lb)
+		for k, v := range lb.Templates {
+			klog.Info("TROZET new2 %v:%#v", k, *v)
+		}
 	}
+	// TODO(trozet) fix deep equal comparison of templates pointers
 	return reflect.DeepEqual(new1, new2)
 }
 
@@ -382,7 +390,7 @@ func buildLB(lb *LB) *templateLoadBalancer {
 	}
 }
 
-// buildVipMap returns a viups map from a set of rules
+// buildVipMap returns a vips map from a set of rules
 func buildVipMap(rules []LBRule) map[string]string {
 	vipMap := make(map[string]string, len(rules))
 	for _, r := range rules {
@@ -450,7 +458,8 @@ func _getLBsCommon(nbClient libovsdbclient.Client, allTemplates TemplateMap, wit
 			services.Insert(service)
 		}
 
-		// Note: no need to fill in Opts and Rules: syncServices populates them later.
+		svcTemplates := getLoadBalancerTemplates(lb, allTemplates)
+
 		// Switches, Routers and Groups for each load balancer will get filled in below.
 		res := LB{
 			UUID:        lb.UUID,
@@ -458,13 +467,87 @@ func _getLBsCommon(nbClient libovsdbclient.Client, allTemplates TemplateMap, wit
 			ExternalIDs: lb.ExternalIDs,
 			Opts:        LBOpts{},
 			Rules:       []LBRule{},
-			Templates:   getLoadBalancerTemplates(lb, allTemplates),
+			Templates:   svcTemplates,
 			Switches:    []string{},
 			Routers:     []string{},
 			Groups:      []string{},
 		}
 		if lb.Protocol != nil {
-			res.Protocol = *lb.Protocol
+			// we treat protocols as uppercase
+			res.Protocol = strings.ToUpper(*lb.Protocol)
+		}
+
+		for k, v := range lb.Options {
+			switch k {
+			case "reject":
+				res.Opts.Reject, _ = strconv.ParseBool(v)
+			case "event":
+				res.Opts.EmptyLBEvents, _ = strconv.ParseBool(v)
+			case "affinity_timeout":
+				x, _ := strconv.ParseInt(v, 10, 32)
+				res.Opts.AffinityTimeOut = int32(x)
+			case "skip_snat":
+				res.Opts.SkipSNAT, _ = strconv.ParseBool(v)
+			case "template":
+				res.Opts.Template, _ = strconv.ParseBool(v)
+			case "address-family":
+				if v == "ipv4" {
+					res.Opts.AddressFamily = corev1.IPv4Protocol
+				} else if v == "ipv6" {
+					res.Opts.AddressFamily = corev1.IPv4Protocol
+				} else {
+					klog.Warning("unknown address-family type: %v for load balancer: %v, %s", v, res.UUID, res.Name)
+				}
+			case "default":
+				klog.Warning("unknown field type: %v for load balancer: %v, %s", k, res.UUID, res.Name)
+			}
+		}
+
+		for vip, targets := range lb.Vips {
+			vals := strings.Split(vip, ":")
+			if len(vals) != 2 {
+				panic(fmt.Sprintf("trozet not 2 values for vip: %v", vals))
+			}
+			hasTemplate := false
+			if strings.HasPrefix(vals[0], "^") {
+				hasTemplate = true
+			}
+
+			x, _ := strconv.ParseInt(vals[1], 10, 32)
+			a := Addr{
+				Port: int32(x),
+			}
+			if !hasTemplate {
+				a.IP = vals[0]
+			} else {
+				templateName := templateNameFromReference(vals[0])
+				if template, found := allTemplates[templateName]; found {
+					a.Template = template
+				}
+			}
+
+			parsedTargets := make([]Addr, 0)
+			if len(targets) > 0 {
+				tVals := strings.Split(targets, ",")
+				for _, ipPort := range tVals {
+					if len(ipPort) > 0 {
+						vals := strings.Split(ipPort, ":")
+						if len(vals) != 2 {
+							panic(fmt.Sprintf("trozet not 2 values for target: %v", vals))
+						}
+						x, _ := strconv.ParseInt(vals[1], 10, 32)
+						parsedTargets = append(parsedTargets, Addr{
+							IP:   vals[0],
+							Port: int32(x),
+						})
+					}
+				}
+			}
+
+			res.Rules = append(res.Rules, LBRule{
+				Source:  a,
+				Targets: parsedTargets,
+			})
 		}
 
 		outMap[lb.UUID] = &res
