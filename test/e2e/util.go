@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1115,4 +1116,63 @@ func getNodeZone(node *v1.Node) (string, error) {
 	}
 
 	return nodeZone, nil
+}
+
+// adds route to a docker node with a full mask
+func addRouteToNode(nodeName string, ips []string, mtu int) error {
+	return routeToNode(nodeName, ips, mtu, true)
+}
+
+// removes a route on a docker node
+func delRouteToNode(nodeName string, ips []string) error {
+	return routeToNode(nodeName, ips, 0, false)
+}
+
+// executes route commands on a node, if add is true, the route is added
+// otherwise removed
+func routeToNode(nodeName string, ips []string, mtu int, add bool) error {
+	ipOp := "del"
+	if add {
+		ipOp = "add"
+	}
+	for _, ip := range ips {
+		mask := 32
+		ipCmd := []string{"ip"}
+		if utilnet.IsIPv6String(ip) {
+			mask = 128
+			ipCmd = []string{"ip", "-6"}
+		}
+		var err error
+		cmd := []string{"docker", "exec", nodeName}
+		cmd = append(cmd, ipCmd...)
+		cmd = append(cmd, "route", ipOp, fmt.Sprintf("%s/%d", ip, mask), "dev", "breth0")
+		if mtu != 0 {
+			cmd = append(cmd, "mtu", strconv.Itoa(mtu))
+		}
+		_, err = runCommand(cmd...)
+		if err != nil {
+			return err
+		}
+
+		cmd = []string{"docker", "exec", nodeName}
+		cmd = append(cmd, ipCmd...)
+		cmd = append(cmd, "addr", "show")
+		var stdout string
+		stdout, err = runCommand(cmd...)
+		if err != nil {
+			return err
+		}
+		framework.Logf("addr output for node  %q:\n%s", nodeName, stdout)
+
+		cmd = []string{"docker", "exec", nodeName}
+		cmd = append(cmd, ipCmd...)
+		cmd = append(cmd, "route", "show")
+
+		stdout, err = runCommand(cmd...)
+		if err != nil {
+			return err
+		}
+		framework.Logf("route output for node  %q:\n%s", nodeName, stdout)
+	}
+	return nil
 }

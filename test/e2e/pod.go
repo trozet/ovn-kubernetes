@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"math/rand"
 	"regexp"
 	"time"
@@ -240,6 +241,216 @@ var _ = ginkgo.Describe("Pod to external server PMTUD", func() {
 					}
 				}
 			})
+		})
+	})
+})
+
+var _ = ginkgo.Describe("Pod to pod TCP with low MTU", func() {
+	const (
+		echoServerPodNameTemplate = "echo-server-pod-%d"
+		echoClientPodName         = "echo-client-pod"
+		serverPodPort             = 9899
+		mtu                       = 1400
+		primaryNetworkName        = "kind"
+	)
+
+	f := wrappedTestFramework("pod2pod-tcp-low-mtu")
+	cleanupFn := func() {}
+
+	ginkgo.AfterEach(func() {
+		cleanupFn()
+	})
+
+	ginkgo.When("a client ovnk pod targeting an ovnk pod server(running on another node)", func() {
+		var serverPod *v1.Pod
+		var serverPodNodeName string
+		var serverPodName string
+		var serverNode v1.Node
+		var clientNode v1.Node
+		var serverNodeInternalIPs []string
+		var clientNodeInternalIPs []string
+
+		var clientPod *v1.Pod
+		var clientPodNodeName string
+
+		payload := fmt.Sprintf("%01360d", 1)
+
+		ginkgo.BeforeEach(func() {
+			ginkgo.By("Selecting 2 schedulable nodes")
+			nodes, err := e2enode.GetBoundedReadySchedulableNodes(context.TODO(), f.ClientSet, 2)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(len(nodes.Items)).To(gomega.BeNumerically(">", 1))
+
+			ginkgo.By("Selecting nodes for client pod and server host-networked pod")
+			serverPodNodeName = nodes.Items[0].Name
+			serverNode = nodes.Items[0]
+			clientPodNodeName = nodes.Items[1].Name
+			clientNode = nodes.Items[1]
+
+			ginkgo.By("Creating hostNetwork:false (ovnk) client pod")
+			clientPod = e2epod.NewAgnhostPod(f.Namespace.Name, echoClientPodName, nil, nil, nil)
+			clientPod.Spec.NodeName = clientPodNodeName
+			for k := range clientPod.Spec.Containers {
+				if clientPod.Spec.Containers[k].Name == "agnhost-container" {
+					clientPod.Spec.Containers[k].Command = []string{
+						"sleep",
+						"infinity",
+					}
+				}
+			}
+			e2epod.NewPodClient(f).CreateSync(context.TODO(), clientPod)
+
+			ginkgo.By("Creating hostNetwork:false (ovnk) server pod")
+			serverPodName = fmt.Sprintf(echoServerPodNameTemplate, serverPodPort)
+			serverPod = e2epod.NewAgnhostPod(f.Namespace.Name, serverPodName, nil, nil, nil,
+				"netexec",
+				"--http-port", fmt.Sprintf("%d", serverPodPort),
+				"--udp-port", fmt.Sprintf("%d", serverPodPort),
+			)
+			serverPod.ObjectMeta.Labels = map[string]string{
+				"app": serverPodName,
+			}
+			serverPod.Spec.NodeName = serverPodNodeName
+			serverPod = e2epod.NewPodClient(f).CreateSync(context.TODO(), serverPod)
+
+			ginkgo.By("Getting all InternalIP addresses of the server node")
+			serverNodeInternalIPs = e2enode.GetAddresses(&serverNode, v1.NodeInternalIP)
+			gomega.Expect(len(serverNodeInternalIPs)).To(gomega.BeNumerically(">", 0))
+
+			ginkgo.By("Getting all InternalIP addresses of the client node")
+			clientNodeInternalIPs = e2enode.GetAddresses(&clientNode, v1.NodeInternalIP)
+			gomega.Expect(len(serverNodeInternalIPs)).To(gomega.BeNumerically(">", 0))
+
+			ginkgo.By("Lowering the MTU route from server -> client")
+			fmt.Println(clientNodeInternalIPs)
+			err = addRouteToNode(serverPodNodeName, clientNodeInternalIPs, mtu)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			ginkgo.By("Lowering the MTU route from client -> server")
+			fmt.Println(serverNodeInternalIPs)
+			err = addRouteToNode(clientPodNodeName, serverNodeInternalIPs, mtu)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			cleanupFn = func() {
+				err = delRouteToNode(serverPodNodeName, clientNodeInternalIPs)
+				err = delRouteToNode(clientPodNodeName, serverNodeInternalIPs)
+			}
+
+		})
+
+		// Lower the MTU between the two nodes to 1400, this will cause pod->pod 1400 byte packets
+		// to be too big for geneve encapsulation
+		ginkgo.When("MTU is lowered between the two nodes", func() {
+			ginkgo.It("large queries to the server pod on another node shall work for TCP", func() {
+				for _, serverPodIP := range serverPod.Status.PodIPs {
+					framework.Logf("Server pod running on node: %s, with IP: %s", serverPodNodeName, serverPodIP.IP)
+					// setup packet capture on each node
+					tcpDumpSync := errgroup.Group{}
+					datapathDumpSync := errgroup.Group{}
+
+					runDatapathDump := func(pod string, node string) error {
+						ticker := time.NewTicker(1 * time.Second)
+						defer ticker.Stop()
+						maxTicks := 15
+						ticks := 0
+						stdout, err := e2ekubectl.RunKubectl(ovnNamespace, "exec", pod, "--", "ovs-appctl",
+							"dpctl/dump-conntrack")
+						if err != nil {
+							return err
+						}
+						framework.Logf("Conntrack flushed on pod: %s, node: %s \n: %s", pod, node, stdout)
+						for range ticker.C {
+							if ticks > maxTicks {
+								return nil
+							}
+							ticks++
+							stdout, err := e2ekubectl.RunKubectl(ovnNamespace, "exec", pod, "--", "ovs-dpctl",
+								"dump-flows")
+							if err != nil {
+								return err
+							}
+							framework.Logf("DATAPTH FLOWS on pod: %s, node: %s \n: %s", pod, node, stdout)
+						}
+						return nil
+					}
+
+					runPacketCapture := func(pod string, node string) error {
+						stdout, err := e2ekubectl.RunKubectl(ovnNamespace, "exec", pod, "--", "timeout", "20",
+							"tcpdump", "-i", "any", "-nneev", fmt.Sprintf("icmp or port %d", serverPodPort))
+						framework.Logf("TCPDUMP on pod: %s, node: %s \n: %s", pod, node, stdout)
+						return err
+					}
+
+					for _, nodeName := range []string{serverPodNodeName, clientPodNodeName} {
+						nodeName := nodeName
+						framework.Logf("Node name is: %s", nodeName)
+						// get the ovnk pod running on the node
+						ovnkPod, err := getOVNKubePod(f.ClientSet, nodeName)
+						framework.ExpectNoError(err, "Could not get OVNK pod to setup TCP capture")
+						tcpDumpSync.Go(func() error {
+							return runPacketCapture(ovnkPod.Name, nodeName)
+						})
+						datapathDumpSync.Go(func() error {
+							return runDatapathDump(ovnkPod.Name, nodeName)
+						})
+					}
+					// give tcpdump a chance to start
+					time.Sleep(2 * time.Second)
+
+					ginkgo.By(fmt.Sprintf("Sending TCP large payload to server IP %s "+
+						"and expecting to receive the same payload", serverPodIP))
+					cmd := fmt.Sprintf("curl --max-time 10 -g -q -s http://%s:%d/echo?msg=%s",
+						serverPodIP.IP,
+						serverPodPort,
+						payload,
+					)
+					framework.Logf("Testing large TCP segments with command %q", cmd)
+					stdout, err := e2epodoutput.RunHostCmdWithRetries(
+						clientPod.Namespace,
+						clientPod.Name,
+						cmd,
+						framework.Poll,
+						30*time.Second)
+					_ = tcpDumpSync.Wait()
+					err = datapathDumpSync.Wait()
+					if err != nil {
+						framework.Logf("Failure during datapath dump: %s")
+					}
+					for _, nodeName := range []string{serverPodNodeName, clientPodNodeName} {
+						nodeName := nodeName
+						framework.Logf("Node name is: %s", nodeName)
+						// get the ovnk pod running on the node
+						ovnkPod, err := getOVNKubePod(f.ClientSet, nodeName)
+						framework.ExpectNoError(err, "Could not get OVNK pod to setup OF dump")
+						stdout, err := e2ekubectl.RunKubectl(ovnNamespace, "exec", ovnkPod.Name, "--", "ovs-ofctl",
+							"dump-flows", "br-int")
+						if err != nil {
+							framework.ExpectNoError(err, "Could not dump OF flows")
+						}
+						framework.Logf("OFDUMP on pod: %s, node: %s \n: %s", ovnkPod.Name, nodeName, stdout)
+						stdout, err = e2ekubectl.RunKubectl(ovnNamespace, "exec", ovnkPod.Name, "--", "ovs-appctl",
+							"dpctl/dump-conntrack")
+						framework.ExpectNoError(err, "Could not dump conntrack")
+						framework.Logf("Conntrack on pod: %s, node: %s \n: %s", ovnkPod.Name, nodeName, stdout)
+					}
+					framework.ExpectNoError(err, "Sending large TCP payload from client failed")
+					gomega.Expect(stdout).To(gomega.Equal(payload),
+						"Received TCP payload from server does not equal expected payload")
+
+					cmd = fmt.Sprintf("ip route get %s", serverPodIP.IP)
+					stdout, err = e2epodoutput.RunHostCmd(
+						clientPod.Namespace,
+						clientPod.Name,
+						cmd)
+					framework.ExpectNoError(err, "Checking ip route cache output failed")
+					framework.Logf(" ip route output in client pod: %s", stdout)
+					gomega.Expect(stdout).To(gomega.MatchRegexp("mtu 1342"))
+
+					// err = tcpDumpSync.Wait()
+					//framework.ExpectNoError(err, "Failed to detect correct TCP packets in capture")
+				}
+			})
+
 		})
 	})
 })
