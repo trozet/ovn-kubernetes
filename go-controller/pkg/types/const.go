@@ -86,6 +86,7 @@ const (
 	// priority of logical router policies on the OVNClusterRouter
 	EgressFirewallStartPriority           = 10000
 	MinimumReservedEgressFirewallPriority = 2000
+	HostAccessSkipNodePortPolicy          = 1550
 	HostAccessPolicyPriority              = 1500
 	MGMTPortPolicyPriority                = "1005"
 	NodeSubnetPolicyPriority              = "1004"

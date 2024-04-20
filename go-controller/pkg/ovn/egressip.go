@@ -2063,15 +2063,19 @@ func ensureDefaultNoRerouteNodePolicies(nbClient libovsdbclient.Client, addressS
 	}
 	ipv4EgressServiceServedPodsAS, ipv6EgressServiceServedPodsAS := as.GetASHashNames()
 
-	var matchV4, matchV6 string
+	var matchV4, matchV6, nodePortMatchV4, nodePortMatchV6 string
 	// construct the policy match
 	if len(v4NodeAddrs) > 0 {
 		matchV4 = fmt.Sprintf(`(ip4.src == $%s || ip4.src == $%s) && ip4.dst == $%s`,
 			ipv4EgressIPServedPodsAS, ipv4EgressServiceServedPodsAS, ipv4ClusterNodeIPAS)
+		nodePortMatchV4 = fmt.Sprintf(`ip4.dst == $%s && (30000 <= tcp.dst <= 32767 || 30000 <= udp.dst <= 32767 || 30000 <= sctp.dst <= 32767)`,
+			ipv4ClusterNodeIPAS)
 	}
 	if len(v6NodeAddrs) > 0 {
 		matchV6 = fmt.Sprintf(`(ip6.src == $%s || ip6.src == $%s) && ip6.dst == $%s`,
 			ipv6EgressIPServedPodsAS, ipv6EgressServiceServedPodsAS, ipv6ClusterNodeIPAS)
+		nodePortMatchV6 = fmt.Sprintf(`ip6.dst == $%s && (30000 <= tcp.dst <= 32767 || 30000 <= udp.dst <= 32767 || 30000 <= sctp.dst <= 32767)`,
+			ipv6ClusterNodeIPAS)
 	}
 	options := map[string]string{"pkt_mark": "1008"}
 	// Create global allow policy for node traffic
@@ -2086,6 +2090,21 @@ func ensureDefaultNoRerouteNodePolicies(nbClient libovsdbclient.Client, addressS
 			return fmt.Errorf("unable to create IPv6 no-reroute node policies, err: %v", err)
 		}
 	}
+
+	if nodePortMatchV4 != "" {
+		// This probably should not live in egress IP, but its convenient to put it here now
+		if err := createLogicalRouterPolicy(nbClient, nodePortMatchV4, types.HostAccessSkipNodePortPolicy, nil, options); err != nil {
+			return fmt.Errorf("unable to create IPv4 no-reroute node policies, err: %v", err)
+		}
+	}
+
+	if nodePortMatchV6 != "" {
+		// This probably should not live in egress IP, but its convenient to put it here now
+		if err := createLogicalRouterPolicy(nbClient, nodePortMatchV6, types.HostAccessSkipNodePortPolicy, nil, options); err != nil {
+			return fmt.Errorf("unable to create IPv4 no-reroute node policies, err: %v", err)
+		}
+	}
+
 	return nil
 }
 
