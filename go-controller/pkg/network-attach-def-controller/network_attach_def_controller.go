@@ -81,10 +81,13 @@ func NewNetAttachDefinitionController(
 	nadController := &NetAttachDefinitionController{
 		name:            fmt.Sprintf("[%s NAD controller]", name),
 		recorder:        recorder,
-		networkManager:  newNetworkManager(name, ncm),
 		networks:        map[string]util.NetInfo{},
 		nads:            map[string]string{},
 		primaryNetworks: syncmap.NewSyncMap[map[string]util.NetInfo](),
+	}
+
+	if ncm != nil {
+		nadController.networkManager = newNetworkManager(name, ncm)
 	}
 
 	config := &controller.ControllerConfig[nettypes.NetworkAttachmentDefinition]{
@@ -122,9 +125,11 @@ func (nadController *NetAttachDefinitionController) Start() error {
 		return err
 	}
 
-	err = nadController.networkManager.Start()
-	if err != nil {
-		return err
+	if nadController.networkManager != nil {
+		err = nadController.networkManager.Start()
+		if err != nil {
+			return err
+		}
 	}
 
 	klog.Infof("%s: started", nadController.name)
@@ -134,7 +139,9 @@ func (nadController *NetAttachDefinitionController) Start() error {
 func (nadController *NetAttachDefinitionController) Stop() {
 	klog.Infof("%s: shutting down", nadController.name)
 	controller.Stop(nadController.controller)
-	nadController.networkManager.Stop()
+	if nadController.networkManager != nil {
+		nadController.networkManager.Stop()
+	}
 }
 
 func (nadController *NetAttachDefinitionController) syncAll() (err error) {
@@ -252,10 +259,14 @@ func (nadController *NetAttachDefinitionController) syncNAD(key string, nad *net
 		oldNetworkName := oldNetwork.GetNetworkName()
 		oldNetwork.DeleteNADs(key)
 		if len(oldNetwork.GetNADs()) == 0 {
-			nadController.networkManager.DeleteNetwork(oldNetworkName)
+			if nadController.networkManager != nil {
+				nadController.networkManager.DeleteNetwork(oldNetworkName)
+			}
 			delete(nadController.networks, oldNetworkName)
 		} else {
-			nadController.networkManager.EnsureNetwork(oldNetwork)
+			if nadController.networkManager != nil {
+				nadController.networkManager.EnsureNetwork(oldNetwork)
+			}
 		}
 		// if oldNetwork is primary, and we are not going to update the active network, delete it
 		// as long as no other NADs reference it
@@ -314,7 +325,9 @@ func (nadController *NetAttachDefinitionController) syncNAD(key string, nad *net
 
 	// ensure the network associated with the NAD
 	nadController.nads[key] = ensureNetwork.GetNetworkName()
-	nadController.networkManager.EnsureNetwork(ensureNetwork)
+	if nadController.networkManager != nil {
+		nadController.networkManager.EnsureNetwork(ensureNetwork)
+	}
 	return err
 }
 
