@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	nadlister "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/controller"
 	egressfirewall "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
@@ -158,17 +157,12 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 		addressSetFactory = addressset.NewOvnAddressSetFactory(cnci.nbClient, config.IPv4Mode, config.IPv6Mode)
 	}
 
-	var nadLister nadlister.NetworkAttachmentDefinitionLister
-	if util.IsNetworkSegmentationSupportEnabled() {
-		nadLister = cnci.watchFactory.NADInformer().Lister()
-	}
-
 	svcController, err := svccontroller.NewController(
 		cnci.client, cnci.nbClient,
 		cnci.watchFactory.ServiceCoreInformer(),
 		cnci.watchFactory.EndpointSliceCoreInformer(),
 		cnci.watchFactory.NodeCoreInformer(),
-		nadLister,
+		nadController,
 		cnci.recorder,
 		&util.DefaultNetInfo{},
 	)

@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	nadlister "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
 	"github.com/ovn-org/libovsdb/ovsdb"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/pod"
@@ -315,17 +314,15 @@ func NewSecondaryLayer3NetworkController(cnci *CommonNetworkControllerInfo, netI
 
 	addressSetFactory := addressset.NewOvnAddressSetFactory(cnci.nbClient, ipv4Mode, ipv6Mode)
 
-	var nadLister nadlister.NetworkAttachmentDefinitionLister
 	var svcController *svccontroller.Controller
 	if util.IsNetworkSegmentationSupportEnabled() && netInfo.IsPrimaryNetwork() {
 		var err error
-		nadLister = cnci.watchFactory.NADInformer().Lister()
 		svcController, err = svccontroller.NewController(
 			cnci.client, cnci.nbClient,
 			cnci.watchFactory.ServiceCoreInformer(),
 			cnci.watchFactory.EndpointSliceCoreInformer(),
 			cnci.watchFactory.NodeCoreInformer(),
-			nadLister,
+			nadController,
 			cnci.recorder,
 			netInfo,
 		)

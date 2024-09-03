@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	nad "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/network-attach-def-controller"
 	"net"
 	"os"
 	"strconv"
@@ -113,6 +114,8 @@ type DefaultNodeNetworkController struct {
 
 	apbExternalRouteNodeController *apbroute.ExternalGatewayNodeController
 
+	nadController *nad.NetAttachDefinitionController
+
 	cniServer *cni.Server
 }
 
@@ -131,7 +134,7 @@ func newDefaultNodeNetworkController(cnnci *CommonNodeNetworkControllerInfo, sto
 }
 
 // NewDefaultNodeNetworkController creates a new network controller for node management of the default network
-func NewDefaultNodeNetworkController(cnnci *CommonNodeNetworkControllerInfo) (*DefaultNodeNetworkController, error) {
+func NewDefaultNodeNetworkController(cnnci *CommonNodeNetworkControllerInfo, nadController *nad.NetAttachDefinitionController) (*DefaultNodeNetworkController, error) {
 	var err error
 	stopChan := make(chan struct{})
 	wg := &sync.WaitGroup{}
@@ -154,6 +157,8 @@ func NewDefaultNodeNetworkController(cnnci *CommonNodeNetworkControllerInfo) (*D
 	if err != nil {
 		return nil, err
 	}
+
+	nc.nadController = nadController
 
 	nc.initRetryFrameworkForNode()
 
