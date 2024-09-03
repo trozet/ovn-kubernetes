@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -19,6 +20,7 @@ import (
 	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 )
@@ -91,7 +93,9 @@ func TestNetAttachDefinitionController(t *testing.T) {
 			Name: "network_A",
 			Type: "ovn-k8s-cni-overlay",
 		},
-		MTU: 1400,
+		Subnets: "10.1.130.0/24",
+		Role:    types.NetworkRolePrimary,
+		MTU:     1400,
 	}
 	network_A_incompatible := &ovncnitypes.NetConf{
 		Topology: types.LocalnetTopology,
@@ -367,13 +371,18 @@ func TestNetAttachDefinitionController(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewWithT(t)
+			err := config.PrepareTestConfig()
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+			config.OVNKubernetesFeature.EnableNetworkSegmentation = true
+			config.OVNKubernetesFeature.EnableMultiNetwork = true
 			tncm := &testNetworkControllerManager{
 				controllers: map[string]NetworkController{},
 			}
 			nadController := &NetAttachDefinitionController{
-				networks:       map[string]util.NetInfo{},
-				nads:           map[string]string{},
-				networkManager: newNetworkManager("", tncm),
+				networks:        map[string]util.NetInfo{},
+				nads:            map[string]string{},
+				networkManager:  newNetworkManager("", tncm),
+				primaryNetworks: syncmap.NewSyncMap[map[string]util.NetInfo](),
 			}
 
 			g.Expect(nadController.networkManager.Start()).To(gomega.Succeed())
@@ -417,6 +426,15 @@ func TestNetAttachDefinitionController(t *testing.T) {
 					g.Expect(tncm.controllers[testNetworkKey].GetNADs()).To(gomega.ConsistOf(expected.nads),
 						fmt.Sprintf("matching NADs for network %s", name))
 					expectRunning = append(expectRunning, testNetworkKey)
+					if netInfo.IsPrimaryNetwork() && !netInfo.IsDefault() {
+						netInfo.SetNADs(expected.nads...)
+						key := expected.nads[0]
+						namespace, _, err := cache.SplitMetaNamespaceKey(key)
+						g.Expect(err).ToNot(gomega.HaveOccurred())
+						netInfoFound, err := nadController.GetActiveNetworkForNamespace(namespace)
+						g.Expect(err).ToNot(gomega.HaveOccurred())
+						g.Expect(reflect.DeepEqual(netInfoFound, netInfo)).To(gomega.BeTrue())
+					}
 				}
 				expectStopped := sets.New(tncm.started...).Difference(sets.New(expectRunning...)).UnsortedList()
 
@@ -434,13 +452,15 @@ func TestNetAttachDefinitionController(t *testing.T) {
 
 func TestSyncAll(t *testing.T) {
 	network_A := &ovncnitypes.NetConf{
-		Topology: types.Layer2Topology,
+		Topology: types.Layer3Topology,
 		NetConf: cnitypes.NetConf{
 			Name: "network_A",
 			Type: "ovn-k8s-cni-overlay",
 		},
-		MTU: 1400,
+		Role: types.NetworkRolePrimary,
+		MTU:  1400,
 	}
+	network_A_Copy := *network_A
 	network_B := &ovncnitypes.NetConf{
 		Topology: types.LocalnetTopology,
 		NetConf: cnitypes.NetConf{
@@ -470,7 +490,7 @@ func TestSyncAll(t *testing.T) {
 				},
 				{
 					name:    "test/nad3",
-					netconf: network_A,
+					netconf: &network_A_Copy,
 				},
 			},
 		},
@@ -479,6 +499,9 @@ func TestSyncAll(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewWithT(t)
 
+			err := config.PrepareTestConfig()
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+			config.OVNKubernetesFeature.EnableNetworkSegmentation = true
 			config.OVNKubernetesFeature.EnableMultiNetwork = true
 			fakeClient := util.GetOVNClientset().GetOVNKubeControllerClientset()
 			wf, err := factory.NewOVNKubeControllerWatchFactory(fakeClient)
@@ -496,6 +519,7 @@ func TestSyncAll(t *testing.T) {
 			g.Expect(err).ToNot(gomega.HaveOccurred())
 
 			expectedNetworks := map[string]util.NetInfo{}
+			expectedPrimaryNetworks := map[string]util.BasicNetInfo{}
 			for _, testNAD := range tt.testNADs {
 				namespace, name, err := cache.SplitMetaNamespaceKey(testNAD.name)
 				g.Expect(err).ToNot(gomega.HaveOccurred())
@@ -513,6 +537,9 @@ func TestSyncAll(t *testing.T) {
 					netInfo, err = util.NewNetInfo(testNAD.netconf)
 					g.Expect(err).ToNot(gomega.HaveOccurred())
 					expectedNetworks[testNAD.netconf.Name] = netInfo
+					if netInfo.IsPrimaryNetwork() && !netInfo.IsDefault() {
+						expectedPrimaryNetworks[netInfo.GetNetworkName()] = netInfo
+					}
 				}
 			}
 
@@ -535,6 +562,11 @@ func TestSyncAll(t *testing.T) {
 				g.Expect(actualNetworks).To(gomega.HaveKey(name))
 				g.Expect(actualNetworks[name].Equals(network)).To(gomega.BeTrue())
 			}
+
+			actualPrimaryNetwork, err := nadController.GetActiveNetworkForNamespace("test")
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+			g.Expect(expectedPrimaryNetworks).To(gomega.HaveKey(actualPrimaryNetwork.GetNetworkName()))
+			g.Expect(expectedPrimaryNetworks[actualPrimaryNetwork.GetNetworkName()].Equals(actualPrimaryNetwork)).To(gomega.BeTrue())
 		})
 	}
 }

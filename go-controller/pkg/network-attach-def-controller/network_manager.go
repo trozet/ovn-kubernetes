@@ -86,7 +86,7 @@ func (nm *networkManagerImpl) Stop() {
 func (nm *networkManagerImpl) EnsureNetwork(network util.NetInfo) {
 	nm.Lock()
 	defer nm.Unlock()
-	nm.networks[network.GetNetworkName()] = network
+	nm.networks[network.GetNetworkName()] = util.CopyNetInfo(network)
 	nm.controller.Reconcile(network.GetNetworkName())
 }
 

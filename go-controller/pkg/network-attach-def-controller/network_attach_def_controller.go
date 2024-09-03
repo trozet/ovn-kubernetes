@@ -270,7 +270,7 @@ func (nadController *NetAttachDefinitionController) syncNAD(key string, nad *net
 		}
 		// if oldNetwork is primary, and we are not going to update the active network, delete it
 		// as long as no other NADs reference it
-		if oldNetwork.IsPrimaryNetwork() && ensureNetwork == nil {
+		if oldNetwork.IsPrimaryNetwork() {
 			nadController.primaryNetworks.LockKey(namespace)
 			primaryNetworks, loaded := nadController.primaryNetworks.Load(namespace)
 			if loaded {
@@ -315,9 +315,9 @@ func (nadController *NetAttachDefinitionController) syncNAD(key string, nad *net
 		var primaryNetInfos map[string]util.NetInfo
 		var loaded bool
 		if primaryNetInfos, loaded = nadController.primaryNetworks.Load(namespace); loaded {
-			primaryNetInfos[ensureNetwork.GetNetworkName()] = ensureNetwork
+			primaryNetInfos[ensureNetwork.GetNetworkName()] = util.CopyNetInfo(ensureNetwork)
 		} else {
-			primaryNetInfos = map[string]util.NetInfo{ensureNetwork.GetNetworkName(): ensureNetwork}
+			primaryNetInfos = map[string]util.NetInfo{ensureNetwork.GetNetworkName(): util.CopyNetInfo(ensureNetwork)}
 		}
 		nadController.primaryNetworks.Store(namespace, primaryNetInfos)
 		nadController.primaryNetworks.UnlockKey(namespace)
@@ -357,7 +357,7 @@ func (nadController *NetAttachDefinitionController) GetActiveNetworkForNamespace
 	} else if len(primaryNetworks) == 1 {
 		for _, netInfo := range primaryNetworks {
 			// only 1 value
-			return netInfo, nil
+			return util.CopyNetInfo(netInfo), nil
 		}
 	}
 	return &util.DefaultNetInfo{}, nil
