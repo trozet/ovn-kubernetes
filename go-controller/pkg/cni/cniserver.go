@@ -49,7 +49,8 @@ import (
 // started.
 
 // NewCNIServer creates and returns a new Server object which will listen on a socket in the given path
-func NewCNIServer(factory factory.NodeWatchFactory, kclient kubernetes.Interface) (*Server, error) {
+func NewCNIServer(factory factory.NodeWatchFactory, kclient kubernetes.Interface,
+	nadController *nad.NetAttachDefinitionController) (*Server, error) {
 	if config.OvnKubeNode.Mode == types.NodeModeDPU {
 		return nil, fmt.Errorf("unsupported ovnkube-node mode for CNI server: %s", config.OvnKubeNode.Mode)
 	}
@@ -75,10 +76,6 @@ func NewCNIServer(factory factory.NodeWatchFactory, kclient kubernetes.Interface
 
 	if util.IsNetworkSegmentationSupportEnabled() {
 		if !config.UnprivilegedMode {
-			nadController, err := nad.NewNetAttachDefinitionController("cni", nil, factory)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create net attach definition controller: %v", err)
-			}
 			s.nadController = nadController
 		}
 		s.clientSet.nadLister = factory.NADInformer().Lister()

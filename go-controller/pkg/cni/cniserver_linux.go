@@ -19,12 +19,6 @@ import (
 // request to the Server's HTTP server, and should return the response bytes,
 // or an error when the operation has completed.
 func (s *Server) Start(rundir string) error {
-	if s.nadController != nil {
-		if err := s.nadController.Start(); err != nil {
-			return err
-		}
-	}
-
 	socketPath := filepath.Join(rundir, serverSocketName)
 
 	// For security reasons the socket must be accessible only to root.
@@ -86,10 +80,4 @@ func (s *Server) Start(rundir string) error {
 		}
 	}, 0)
 	return nil
-}
-
-func (s *Server) Stop() {
-	if s.nadController != nil {
-		s.nadController.Stop()
-	}
 }

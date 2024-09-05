@@ -799,7 +799,7 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 		if !ok {
 			return fmt.Errorf("cannot get kubeclient for starting CNI server")
 		}
-		cniServer, err = cni.NewCNIServer(nc.watchFactory, kclient.KClient)
+		cniServer, err = cni.NewCNIServer(nc.watchFactory, kclient.KClient, nc.nadController)
 		if err != nil {
 			return err
 		}
@@ -1151,7 +1151,6 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 // Stop gracefully stops the controller
 // deleteLogicalEntities will never be true for default network
 func (nc *DefaultNodeNetworkController) Stop() {
-	nc.cniServer.Stop()
 	close(nc.stopChan)
 	nc.wg.Wait()
 }
