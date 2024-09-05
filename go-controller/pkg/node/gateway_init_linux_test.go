@@ -248,7 +248,7 @@ func shareGatewayInterfaceTest(app *cli.App, testNS ns.NetNS,
 		rm := routemanager.NewController()
 		var nadController *networkAttachDefController.NetAttachDefinitionController
 		if util.IsNetworkSegmentationSupportEnabled() {
-			nadController, err = networkAttachDefController.NewNetAttachDefinitionController("test", nil, wf)
+			nadController, err = networkAttachDefController.NewNetAttachDefinitionController("test", nil, wf, nil)
 			Expect(err).NotTo(HaveOccurred())
 			err = nadController.Start()
 			Expect(err).NotTo(HaveOccurred())
@@ -684,7 +684,7 @@ func shareGatewayInterfaceDPUTest(app *cli.App, testNS ns.NetNS,
 		rm := routemanager.NewController()
 		var nadController *networkAttachDefController.NetAttachDefinitionController
 		if util.IsNetworkSegmentationSupportEnabled() {
-			nadController, err = networkAttachDefController.NewNetAttachDefinitionController("test", nil, wf)
+			nadController, err = networkAttachDefController.NewNetAttachDefinitionController("test", nil, wf, nil)
 			Expect(err).NotTo(HaveOccurred())
 			err = nadController.Start()
 			Expect(err).NotTo(HaveOccurred())
@@ -1137,7 +1137,7 @@ OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0`
 		rm := routemanager.NewController()
 		var nadController *networkAttachDefController.NetAttachDefinitionController
 		if util.IsNetworkSegmentationSupportEnabled() {
-			nadController, err = networkAttachDefController.NewNetAttachDefinitionController("test", nil, wf)
+			nadController, err = networkAttachDefController.NewNetAttachDefinitionController("test", nil, wf, nil)
 			Expect(err).NotTo(HaveOccurred())
 			err = nadController.Start()
 			Expect(err).NotTo(HaveOccurred())

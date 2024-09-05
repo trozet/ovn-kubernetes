@@ -202,7 +202,8 @@ var _ = Describe("UserDefinedNetworkGateway", func() {
 	)
 	BeforeEach(func() {
 		// Restore global default values before each testcase
-		config.PrepareTestConfig()
+		err := config.PrepareTestConfig()
+		Expect(err).NotTo(HaveOccurred())
 		config.OVNKubernetesFeature.EnableMultiNetwork = true
 		config.OVNKubernetesFeature.EnableNetworkSegmentation = true
 		// Use a larger masq subnet to allow OF manager to allocate IPs for UDNs.
@@ -212,7 +213,6 @@ var _ = Describe("UserDefinedNetworkGateway", func() {
 		fexec = ovntest.NewFakeExec()
 		Expect(util.SetExec(fexec)).To(Succeed())
 		// Set up a fake k8sMgmt interface
-		var err error
 		testNS, err = testutils.NewNS()
 		Expect(err).NotTo(HaveOccurred())
 		err = testNS.Do(func(ns.NetNS) error {
@@ -509,7 +509,7 @@ var _ = Describe("UserDefinedNetworkGateway", func() {
 			gatewayNextHops, gatewayIntf, err := getGatewayNextHops()
 			Expect(err).NotTo(HaveOccurred())
 
-			nadController, err := networkAttachDefController.NewNetAttachDefinitionController("test", nil, wf)
+			nadController, err := networkAttachDefController.NewNetAttachDefinitionController("test", nil, wf, nil)
 			Expect(err).NotTo(HaveOccurred())
 
 			// make preparations for creating openflow manager in DNCC which can be used for SNCC
@@ -685,7 +685,7 @@ var _ = Describe("UserDefinedNetworkGateway", func() {
 			gatewayNextHops, gatewayIntf, err := getGatewayNextHops()
 			Expect(err).NotTo(HaveOccurred())
 
-			nadController, err := networkAttachDefController.NewNetAttachDefinitionController("test", nil, wf)
+			nadController, err := networkAttachDefController.NewNetAttachDefinitionController("test", nil, wf, nil)
 			Expect(err).NotTo(HaveOccurred())
 			// make preparations for creating openflow manager in DNCC which can be used for SNCC
 			localGw, err := newLocalGateway(nodeName, ovntest.MustParseIPNets(v4NodeSubnet, v6NodeSubnet), gatewayNextHops,
