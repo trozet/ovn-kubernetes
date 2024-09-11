@@ -271,29 +271,7 @@ func (nadController *NetAttachDefinitionController) syncNAD(key string, nad *net
 		// if oldNetwork is primary, and we are not going to update the active network, delete it
 		// as long as no other NADs reference it
 		if oldNetwork.IsPrimaryNetwork() {
-			nadController.primaryNetworks.LockKey(namespace)
-			primaryNetworks, loaded := nadController.primaryNetworks.Load(namespace)
-			if loaded {
-				if len(oldNetwork.GetNADs()) > 0 {
-					// some NAD still references this network, do not remove it,
-					// but still update the syncmap with the latest version removing the NAD
-					// reference
-					for name := range primaryNetworks {
-						if name == oldNetworkName {
-							primaryNetworks[name] = oldNetwork
-							break
-						}
-					}
-				} else if len(primaryNetworks) > 1 {
-					// multiple primary networks for this namespace, just remove the one
-					delete(primaryNetworks, oldNetworkName)
-					nadController.primaryNetworks.Store(namespace, primaryNetworks)
-				} else {
-					// only 1 network, delete the entire namespace from being tracked
-					nadController.primaryNetworks.Delete(namespace)
-				}
-			}
-			nadController.primaryNetworks.UnlockKey(namespace)
+			nadController.unsetActiveNetworkForNamespace(namespace, oldNetwork)
 		}
 	}
 
@@ -311,16 +289,7 @@ func (nadController *NetAttachDefinitionController) syncNAD(key string, nad *net
 	ensureNetwork.AddNADs(key)
 
 	if ensureNetwork.IsPrimaryNetwork() {
-		nadController.primaryNetworks.LockKey(namespace)
-		var primaryNetInfos map[string]util.NetInfo
-		var loaded bool
-		if primaryNetInfos, loaded = nadController.primaryNetworks.Load(namespace); loaded {
-			primaryNetInfos[ensureNetwork.GetNetworkName()] = util.CopyNetInfo(ensureNetwork)
-		} else {
-			primaryNetInfos = map[string]util.NetInfo{ensureNetwork.GetNetworkName(): util.CopyNetInfo(ensureNetwork)}
-		}
-		nadController.primaryNetworks.Store(namespace, primaryNetInfos)
-		nadController.primaryNetworks.UnlockKey(namespace)
+		nadController.setActiveNetworkForNamespace(namespace, util.CopyNetInfo(ensureNetwork))
 	}
 
 	// ensure the network associated with the NAD
@@ -343,6 +312,46 @@ func nadNeedsUpdate(oldNAD, newNAD *nettypes.NetworkAttachmentDefinition) bool {
 	}
 
 	return !reflect.DeepEqual(oldNAD.Spec, newNAD.Spec)
+}
+
+func (nadController *NetAttachDefinitionController) unsetActiveNetworkForNamespace(namespace string, oldNetwork util.NetInfo) {
+	nadController.primaryNetworks.LockKey(namespace)
+	defer nadController.primaryNetworks.UnlockKey(namespace)
+	primaryNetworks, loaded := nadController.primaryNetworks.Load(namespace)
+	if loaded {
+		if len(oldNetwork.GetNADs()) > 0 {
+			// some NAD still references this network, do not remove it,
+			// but still update the syncmap with the latest version removing the NAD
+			// reference
+			for name := range primaryNetworks {
+				if name == oldNetwork.GetNetworkName() {
+					primaryNetworks[name] = oldNetwork
+					nadController.primaryNetworks.Store(namespace, primaryNetworks)
+					return
+				}
+			}
+		} else if len(primaryNetworks) > 1 {
+			// multiple primary networks for this namespace, just remove the one
+			delete(primaryNetworks, oldNetwork.GetNetworkName())
+			nadController.primaryNetworks.Store(namespace, primaryNetworks)
+		} else {
+			// only 1 network, delete the entire namespace from being tracked
+			nadController.primaryNetworks.Delete(namespace)
+		}
+	}
+}
+
+func (nadController *NetAttachDefinitionController) setActiveNetworkForNamespace(namespace string, ensureNetwork util.NetInfo) {
+	nadController.primaryNetworks.LockKey(namespace)
+	defer nadController.primaryNetworks.UnlockKey(namespace)
+	var primaryNetInfos map[string]util.NetInfo
+	var loaded bool
+	if primaryNetInfos, loaded = nadController.primaryNetworks.Load(namespace); loaded {
+		primaryNetInfos[ensureNetwork.GetNetworkName()] = ensureNetwork
+	} else {
+		primaryNetInfos = map[string]util.NetInfo{ensureNetwork.GetNetworkName(): ensureNetwork}
+	}
+	nadController.primaryNetworks.Store(namespace, primaryNetInfos)
 }
 
 func (nadController *NetAttachDefinitionController) GetActiveNetworkForNamespace(namespace string) (util.NetInfo, error) {
