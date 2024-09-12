@@ -86,9 +86,7 @@ func NewNetAttachDefinitionController(
 		primaryNetworks: syncmap.NewSyncMap[map[string]util.NetInfo](),
 	}
 
-	if ncm != nil {
-		nadController.networkManager = newNetworkManager(name, ncm)
-	}
+	nadController.networkManager = newNetworkManager(name, ncm)
 
 	config := &controller.ControllerConfig[nettypes.NetworkAttachmentDefinition]{
 		RateLimiter:    workqueue.DefaultControllerRateLimiter(),
@@ -125,11 +123,9 @@ func (nadController *NetAttachDefinitionController) Start() error {
 		return err
 	}
 
-	if nadController.networkManager != nil {
-		err = nadController.networkManager.Start()
-		if err != nil {
-			return err
-		}
+	err = nadController.networkManager.Start()
+	if err != nil {
+		return err
 	}
 
 	klog.Infof("%s: started", nadController.name)
@@ -139,9 +135,7 @@ func (nadController *NetAttachDefinitionController) Start() error {
 func (nadController *NetAttachDefinitionController) Stop() {
 	klog.Infof("%s: shutting down", nadController.name)
 	controller.Stop(nadController.controller)
-	if nadController.networkManager != nil {
-		nadController.networkManager.Stop()
-	}
+	nadController.networkManager.Stop()
 }
 
 func (nadController *NetAttachDefinitionController) syncAll() (err error) {
@@ -259,14 +253,10 @@ func (nadController *NetAttachDefinitionController) syncNAD(key string, nad *net
 		oldNetworkName := oldNetwork.GetNetworkName()
 		oldNetwork.DeleteNADs(key)
 		if len(oldNetwork.GetNADs()) == 0 {
-			if nadController.networkManager != nil {
-				nadController.networkManager.DeleteNetwork(oldNetworkName)
-			}
+			nadController.networkManager.DeleteNetwork(oldNetworkName)
 			delete(nadController.networks, oldNetworkName)
 		} else {
-			if nadController.networkManager != nil {
-				nadController.networkManager.EnsureNetwork(oldNetwork)
-			}
+			nadController.networkManager.EnsureNetwork(oldNetwork)
 		}
 		// if oldNetwork is primary, and we are not going to update the active network, delete it
 		// as long as no other NADs reference it
@@ -294,9 +284,7 @@ func (nadController *NetAttachDefinitionController) syncNAD(key string, nad *net
 
 	// ensure the network associated with the NAD
 	nadController.nads[key] = ensureNetwork.GetNetworkName()
-	if nadController.networkManager != nil {
-		nadController.networkManager.EnsureNetwork(ensureNetwork)
-	}
+	nadController.networkManager.EnsureNetwork(ensureNetwork)
 	return err
 }
 
@@ -375,4 +363,28 @@ func (nadController *NetAttachDefinitionController) GetActiveNetworkForNamespace
 // SetPrimaryNetworksForTest is used for testing purposes only
 func (nadController *NetAttachDefinitionController) SetPrimaryNetworksForTest(primaryNetworks *syncmap.SyncMap[map[string]util.NetInfo]) {
 	nadController.primaryNetworks = primaryNetworks
+}
+
+type FakeNetworkController struct {
+	util.NetInfo
+}
+
+func (nc *FakeNetworkController) Start(ctx context.Context) error {
+	return nil
+}
+
+func (nc *FakeNetworkController) Stop() {}
+
+func (nc *FakeNetworkController) Cleanup() error {
+	return nil
+}
+
+type FakeNetworkControllerManager struct{}
+
+func (ncm *FakeNetworkControllerManager) NewNetworkController(netInfo util.NetInfo) (NetworkController, error) {
+	return &FakeNetworkController{netInfo}, nil
+}
+
+func (ncm *FakeNetworkControllerManager) CleanupDeletedNetworks(validNetworks ...util.BasicNetInfo) error {
+	return nil
 }
