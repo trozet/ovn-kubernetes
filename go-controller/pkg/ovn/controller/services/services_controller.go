@@ -57,7 +57,7 @@ func NewController(client clientset.Interface,
 	serviceInformer coreinformers.ServiceInformer,
 	endpointSliceInformer discoveryinformers.EndpointSliceInformer,
 	nodeInformer coreinformers.NodeInformer,
-	nadController *networkAttachDefController.NetAttachDefinitionController,
+	nadController networkAttachDefController.NADController,
 	recorder record.EventRecorder,
 	netInfo util.NetInfo,
 ) (*Controller, error) {
@@ -108,7 +108,7 @@ type Controller struct {
 	endpointSliceInformer discoveryinformers.EndpointSliceInformer
 	endpointSliceLister   discoverylisters.EndpointSliceLister
 
-	nadController *networkAttachDefController.NetAttachDefinitionController
+	nadController networkAttachDefController.NADController
 
 	nodesSynced cache.InformerSynced
 

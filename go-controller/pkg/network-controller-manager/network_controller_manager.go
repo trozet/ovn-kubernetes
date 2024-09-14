@@ -67,7 +67,7 @@ func (cm *NetworkControllerManager) NewNetworkController(nInfo util.NetInfo) (na
 	case ovntypes.Layer2Topology:
 		return ovn.NewSecondaryLayer2NetworkController(cnci, nInfo, cm.nadController), nil
 	case ovntypes.LocalnetTopology:
-		return ovn.NewSecondaryLocalnetNetworkController(cnci, nInfo), nil
+		return ovn.NewSecondaryLocalnetNetworkController(cnci, nInfo, cm.nadController), nil
 	}
 	return nil, fmt.Errorf("topology type %s not supported", topoType)
 }
@@ -85,7 +85,7 @@ func (cm *NetworkControllerManager) newDummyNetworkController(topoType, netName 
 	case ovntypes.Layer2Topology:
 		return ovn.NewSecondaryLayer2NetworkController(cnci, netInfo, cm.nadController), nil
 	case ovntypes.LocalnetTopology:
-		return ovn.NewSecondaryLocalnetNetworkController(cnci, netInfo), nil
+		return ovn.NewSecondaryLocalnetNetworkController(cnci, netInfo, cm.nadController), nil
 	}
 	return nil, fmt.Errorf("topology type %s not supported", topoType)
 }

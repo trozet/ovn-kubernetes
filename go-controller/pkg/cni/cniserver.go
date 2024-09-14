@@ -75,9 +75,7 @@ func NewCNIServer(factory factory.NodeWatchFactory, kclient kubernetes.Interface
 	}
 
 	if util.IsNetworkSegmentationSupportEnabled() {
-		if !config.UnprivilegedMode {
-			s.nadController = nadController
-		}
+		s.nadController = nadController
 		s.clientSet.nadLister = factory.NADInformer().Lister()
 	}
 

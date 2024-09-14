@@ -34,6 +34,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/routemanager"
 	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
 	linkMock "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/vishvananda/netlink"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/nad"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	utilMock "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/mocks"
@@ -248,7 +249,7 @@ func shareGatewayInterfaceTest(app *cli.App, testNS ns.NetNS,
 		rm := routemanager.NewController()
 		var nadController *networkAttachDefController.NetAttachDefinitionController
 		if util.IsNetworkSegmentationSupportEnabled() {
-			testNCM := &networkAttachDefController.FakeNetworkControllerManager{}
+			testNCM := &nad.FakeNetworkControllerManager{}
 			nadController, err = networkAttachDefController.NewNetAttachDefinitionController("test", testNCM, wf, nil)
 			Expect(err).NotTo(HaveOccurred())
 			err = nadController.Start()
@@ -685,7 +686,7 @@ func shareGatewayInterfaceDPUTest(app *cli.App, testNS ns.NetNS,
 		rm := routemanager.NewController()
 		var nadController *networkAttachDefController.NetAttachDefinitionController
 		if util.IsNetworkSegmentationSupportEnabled() {
-			testNCM := &networkAttachDefController.FakeNetworkControllerManager{}
+			testNCM := &nad.FakeNetworkControllerManager{}
 			nadController, err = networkAttachDefController.NewNetAttachDefinitionController("test", testNCM, wf, nil)
 			Expect(err).NotTo(HaveOccurred())
 			err = nadController.Start()
@@ -1139,7 +1140,7 @@ OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0`
 		rm := routemanager.NewController()
 		var nadController *networkAttachDefController.NetAttachDefinitionController
 		if util.IsNetworkSegmentationSupportEnabled() {
-			testNCM := &networkAttachDefController.FakeNetworkControllerManager{}
+			testNCM := &nad.FakeNetworkControllerManager{}
 			nadController, err = networkAttachDefController.NewNetAttachDefinitionController("test", testNCM, wf, nil)
 			Expect(err).NotTo(HaveOccurred())
 			err = nadController.Start()

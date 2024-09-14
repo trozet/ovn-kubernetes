@@ -14,12 +14,12 @@ import (
 type podAnnotWaitCond = func(map[string]string, string) (*util.PodAnnotation, bool)
 
 type UserDefinedPrimaryNetwork struct {
-	nadController *nad.NetAttachDefinitionController
+	nadController nad.NADController
 	annotation    *util.PodAnnotation
 	activeNetwork util.NetInfo
 }
 
-func NewPrimaryNetwork(nadController *nad.NetAttachDefinitionController) *UserDefinedPrimaryNetwork {
+func NewPrimaryNetwork(nadController nad.NADController) *UserDefinedPrimaryNetwork {
 	return &UserDefinedPrimaryNetwork{
 		nadController: nadController,
 	}

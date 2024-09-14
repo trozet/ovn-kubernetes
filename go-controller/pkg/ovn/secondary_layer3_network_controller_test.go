@@ -16,6 +16,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	nadapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
@@ -23,9 +24,9 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 	networkAttachDefController "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/network-attach-def-controller"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
 	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	fakenad "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/nad"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
@@ -152,6 +153,8 @@ var _ = Describe("OVN Multi-Homed pod operations", func() {
 				_, ok := pod.Annotations[util.OvnPodAnnotationName]
 				Expect(ok).To(BeFalse())
 
+				Expect(fakeOvn.controller.nadController.Start()).NotTo(HaveOccurred())
+
 				Expect(fakeOvn.controller.WatchNamespaces()).NotTo(HaveOccurred())
 				Expect(fakeOvn.controller.WatchPods()).NotTo(HaveOccurred())
 				secondaryNetController, ok := fakeOvn.secondaryControllers[secondaryNetworkName]
@@ -242,11 +245,10 @@ var _ = Describe("OVN Multi-Homed pod operations", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				networkConfig.SetNADs(util.GetNADName(nad.Namespace, nad.Name))
-				nadController := &networkAttachDefController.NetAttachDefinitionController{}
-				nadNetworks := map[string]util.NetInfo{networkConfig.GetNetworkName(): networkConfig}
-				primaryNetworks := syncmap.NewSyncMap[map[string]util.NetInfo]()
-				primaryNetworks.Store(ns, nadNetworks)
-				nadController.SetPrimaryNetworksForTest(primaryNetworks)
+				nadController := &fakenad.FakeNADController{
+					PrimaryNetworks: make(map[string]sets.Set[util.NetInfo]),
+				}
+				nadController.PrimaryNetworks[ns] = sets.New[util.NetInfo](networkConfig)
 
 				const nodeIPv4CIDR = "192.168.126.202/24"
 				testNode, err := newNodeWithSecondaryNets(nodeName, nodeIPv4CIDR, netInfo)
@@ -300,6 +302,8 @@ var _ = Describe("OVN Multi-Homed pod operations", func() {
 				Expect(err).NotTo(HaveOccurred())
 				_, ok := pod.Annotations[util.OvnPodAnnotationName]
 				Expect(ok).To(BeFalse())
+
+				Expect(fakeOvn.controller.nadController.Start()).NotTo(HaveOccurred())
 
 				Expect(fakeOvn.controller.WatchNamespaces()).To(Succeed())
 				Expect(fakeOvn.controller.WatchPods()).To(Succeed())
@@ -905,7 +909,7 @@ func standardNonDefaultNetworkExtIDsForLogicalSwitch(netInfo util.NetInfo) map[s
 	return externalIDs
 }
 
-func newSecondaryLayer3NetworkController(cnci *CommonNetworkControllerInfo, netInfo util.NetInfo, nodeName string, nadController *networkAttachDefController.NetAttachDefinitionController) *SecondaryLayer3NetworkController {
+func newSecondaryLayer3NetworkController(cnci *CommonNetworkControllerInfo, netInfo util.NetInfo, nodeName string, nadController networkAttachDefController.NADController) *SecondaryLayer3NetworkController {
 	layer3NetworkController, err := NewSecondaryLayer3NetworkController(cnci, netInfo, nadController)
 	Expect(err).NotTo(HaveOccurred())
 	layer3NetworkController.gatewayManagers.Store(

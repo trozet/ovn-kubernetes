@@ -159,8 +159,7 @@ type BaseNetworkController struct {
 	zoneICHandler *zoneic.ZoneInterconnectHandler
 
 	// nadController used for getting network information for UDNs
-	nadController *nad.NetAttachDefinitionController
-
+	nadController nad.NADController
 	// releasedPodsBeforeStartup tracks pods per NAD (map of NADs to pods UIDs)
 	// might have been already be released on startup
 	releasedPodsBeforeStartup  map[string]sets.Set[string]

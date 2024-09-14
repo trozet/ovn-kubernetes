@@ -239,7 +239,7 @@ type SecondaryLayer2NetworkController struct {
 }
 
 // NewSecondaryLayer2NetworkController create a new OVN controller for the given secondary layer2 nad
-func NewSecondaryLayer2NetworkController(cnci *CommonNetworkControllerInfo, netInfo util.NetInfo, nadController *nad.NetAttachDefinitionController) *SecondaryLayer2NetworkController {
+func NewSecondaryLayer2NetworkController(cnci *CommonNetworkControllerInfo, netInfo util.NetInfo, nadController nad.NADController) *SecondaryLayer2NetworkController {
 
 	stopChan := make(chan struct{})
 

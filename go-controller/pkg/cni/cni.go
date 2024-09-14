@@ -111,7 +111,7 @@ func (pr *PodRequest) cmdAdd(kubeAuth *KubeAPIAuth, clientset *ClientSet,
 	return pr.cmdAddWithGetCNIResultFunc(kubeAuth, clientset, getCNIResult, nadController)
 }
 func (pr *PodRequest) cmdAddWithGetCNIResultFunc(kubeAuth *KubeAPIAuth, clientset *ClientSet,
-	getCNIResultFn getCNIResultFunc, nadController *nad.NetAttachDefinitionController) (*Response, error) {
+	getCNIResultFn getCNIResultFunc, nadController nad.NADController) (*Response, error) {
 	namespace := pr.PodNamespace
 	podName := pr.PodName
 	if namespace == "" || podName == "" {

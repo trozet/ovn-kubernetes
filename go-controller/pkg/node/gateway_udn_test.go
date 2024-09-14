@@ -32,6 +32,7 @@ import (
 	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
 	coreinformermocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/client-go/informers/core/v1"
 	v1mocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/client-go/listers/core/v1"
+	fakenad "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/nad"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 )
@@ -508,7 +509,7 @@ var _ = Describe("UserDefinedNetworkGateway", func() {
 			defer GinkgoRecover()
 			gatewayNextHops, gatewayIntf, err := getGatewayNextHops()
 			Expect(err).NotTo(HaveOccurred())
-			testNCM := &networkAttachDefController.FakeNetworkControllerManager{}
+			testNCM := &fakenad.FakeNetworkControllerManager{}
 			nadController, err := networkAttachDefController.NewNetAttachDefinitionController("test", testNCM, wf, nil)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -684,7 +685,7 @@ var _ = Describe("UserDefinedNetworkGateway", func() {
 			defer GinkgoRecover()
 			gatewayNextHops, gatewayIntf, err := getGatewayNextHops()
 			Expect(err).NotTo(HaveOccurred())
-			testNCM := &networkAttachDefController.FakeNetworkControllerManager{}
+			testNCM := &fakenad.FakeNetworkControllerManager{}
 			nadController, err := networkAttachDefController.NewNetAttachDefinitionController("test", testNCM, wf, nil)
 			Expect(err).NotTo(HaveOccurred())
 			// make preparations for creating openflow manager in DNCC which can be used for SNCC

@@ -13,13 +13,13 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	nad "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/network-attach-def-controller"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
 	v1mocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/client-go/listers/core/v1"
+	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/nad"
 	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 )
@@ -144,8 +144,9 @@ var _ = Describe("Network Segmentation", func() {
 				},
 			}
 		})
-		nadController := &nad.NetAttachDefinitionController{}
-		nadController.SetPrimaryNetworksForTest(syncmap.NewSyncMap[map[string]util.NetInfo]())
+		nadController := &ovntest.FakeNADController{
+			PrimaryNetworks: make(map[string]sets.Set[util.NetInfo]),
+		}
 		It("should not fail at cmdAdd", func() {
 			podNamespaceLister.On("Get", pr.PodName).Return(pod, nil)
 			Expect(pr.cmdAddWithGetCNIResultFunc(kubeAuth, clientSet, getCNIResultStub, nadController)).NotTo(BeNil())

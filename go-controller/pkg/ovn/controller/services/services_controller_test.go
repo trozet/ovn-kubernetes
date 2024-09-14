@@ -20,6 +20,7 @@ import (
 	networkAttachDefController "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/network-attach-def-controller"
 	kubetest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
 	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/nad"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	"golang.org/x/exp/maps"
@@ -83,7 +84,7 @@ func newControllerWithDBSetupForNetwork(dbSetup libovsdbtest.TestSetup, netInfo 
 			return nil, err
 		}
 	}
-	testNCM := &networkAttachDefController.FakeNetworkControllerManager{}
+	testNCM := &nad.FakeNetworkControllerManager{}
 	nadController, err := networkAttachDefController.NewNetAttachDefinitionController("test", testNCM, factoryMock, nil)
 	if err != nil {
 		return nil, err

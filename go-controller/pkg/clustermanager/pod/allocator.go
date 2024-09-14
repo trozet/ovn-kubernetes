@@ -41,7 +41,7 @@ type PodAllocator struct {
 
 	ipamClaimsReconciler persistentips.PersistentAllocations
 
-	nadController *nad.NetAttachDefinitionController
+	nadController nad.NADController
 
 	// event recorder used to post events to k8s
 	recorder record.EventRecorder
@@ -58,7 +58,7 @@ func NewPodAllocator(
 	podAnnotationAllocator *pod.PodAnnotationAllocator,
 	ipAllocator subnet.Allocator,
 	claimsReconciler persistentips.PersistentAllocations,
-	nadController *nad.NetAttachDefinitionController,
+	nadController nad.NADController,
 	recorder record.EventRecorder,
 ) *PodAllocator {
 	podAllocator := &PodAllocator{

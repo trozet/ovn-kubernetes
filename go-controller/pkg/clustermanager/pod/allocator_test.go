@@ -16,10 +16,9 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/pod"
 	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	nad "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/network-attach-def-controller"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/persistentips"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
 	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/nad"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 
@@ -596,21 +595,18 @@ func TestPodAllocator_reconcileForNAD(t *testing.T) {
 				ipamClaimsReconciler,
 			)
 
-			primaryNetworks := syncmap.NewSyncMap[map[string]util.NetInfo]()
-			nadNetworks := map[string]util.NetInfo{}
 			testNs := "namespace"
+			nadNetworks := map[string]sets.Set[util.NetInfo]{testNs: {}}
 			for _, nad := range tt.args.nads {
 				if nad.Namespace == testNs {
 					nadNetwork, _ := util.ParseNADInfo(nad)
 					if nadNetwork.IsPrimaryNetwork() {
-						nadNetworks[nadNetwork.GetNetworkName()] = nadNetwork
+						nadNetworks[testNs].Insert(nadNetwork)
 					}
 				}
 			}
-			primaryNetworks.Store("namespace", nadNetworks)
 
-			nadController := &nad.NetAttachDefinitionController{}
-			nadController.SetPrimaryNetworksForTest(primaryNetworks)
+			nadController := &nad.FakeNADController{PrimaryNetworks: nadNetworks}
 
 			fakeRecorder := record.NewFakeRecorder(10)
 

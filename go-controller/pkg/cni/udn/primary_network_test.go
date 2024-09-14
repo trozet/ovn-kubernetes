@@ -5,14 +5,14 @@ import (
 
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	nadapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	nad "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/network-attach-def-controller"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
 	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
 	v1nadmocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/nad"
 	types "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 )
@@ -189,21 +189,24 @@ func TestWaitForPrimaryAnnotationFn(t *testing.T) {
 			waitCond := func(map[string]string, string) (*util.PodAnnotation, bool) {
 				return tt.annotationFromFn, tt.isReadyFromFn
 			}
-			nadController := &nad.NetAttachDefinitionController{}
-			primaryNetworks := syncmap.NewSyncMap[map[string]util.NetInfo]()
+
+			nadController := &nad.FakeNADController{
+				PrimaryNetworks: map[string]sets.Set[util.NetInfo]{},
+			}
 			for _, nad := range tt.nads {
-				nadNetworks := map[string]util.NetInfo{}
-				if nets, loaded := primaryNetworks.Load(nad.Namespace); loaded {
+				nadNetworks := sets.Set[util.NetInfo]{}
+				if nets, loaded := nadController.PrimaryNetworks[nad.Namespace]; loaded {
 					nadNetworks = nets
+				} else {
+					nadController.PrimaryNetworks[nad.Namespace] = nadNetworks
 				}
 				nadNetwork, _ := util.ParseNADInfo(nad)
 				nadNetwork.SetNADs(util.GetNADName(nad.Namespace, nad.Name))
 				if nadNetwork.IsPrimaryNetwork() {
-					nadNetworks[nadNetwork.GetNetworkName()] = nadNetwork
+					nadNetworks.Insert(nadNetwork)
 				}
-				primaryNetworks.Store(nad.Namespace, nadNetworks)
 			}
-			nadController.SetPrimaryNetworksForTest(primaryNetworks)
+
 			userDefinedPrimaryNetwork := NewPrimaryNetwork(nadController)
 			obtainedAnnotation, obtainedIsReady := userDefinedPrimaryNetwork.WaitForPrimaryAnnotationFn(tt.namespace, waitCond)(tt.annotations, tt.nadName)
 			obtainedFound := userDefinedPrimaryNetwork.Found()

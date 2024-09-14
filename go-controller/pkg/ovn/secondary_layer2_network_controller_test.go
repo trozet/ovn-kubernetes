@@ -14,15 +14,16 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	nadapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 	networkAttachDefController "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/network-attach-def-controller"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
 	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/nad"
 	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 )
@@ -109,6 +110,7 @@ var _ = Describe("OVN Multi-Homed pod operations for layer2 network", func() {
 					_, ok := pod.Annotations[util.OvnPodAnnotationName]
 					Expect(ok).To(BeFalse())
 				}
+				Expect(fakeOvn.controller.nadController.Start()).NotTo(HaveOccurred())
 
 				Expect(fakeOvn.controller.WatchNamespaces()).NotTo(HaveOccurred())
 				Expect(fakeOvn.controller.WatchPods()).NotTo(HaveOccurred())
@@ -197,13 +199,10 @@ var _ = Describe("OVN Multi-Homed pod operations for layer2 network", func() {
 				networkConfig, err := util.NewNetInfo(netConf)
 				Expect(err).NotTo(HaveOccurred())
 
-				nadController := &networkAttachDefController.NetAttachDefinitionController{}
-				nadNetworks := map[string]util.NetInfo{networkConfig.GetNetworkName(): networkConfig}
-
-				primaryNetworks := syncmap.NewSyncMap[map[string]util.NetInfo]()
-				primaryNetworks.Store(ns, nadNetworks)
-				nadController.SetPrimaryNetworksForTest(primaryNetworks)
-
+				nadController := &nad.FakeNADController{
+					PrimaryNetworks: make(map[string]sets.Set[util.NetInfo]),
+				}
+				nadController.PrimaryNetworks[ns] = sets.New[util.NetInfo](networkConfig)
 				nad, err := newNetworkAttachmentDefinition(
 					ns,
 					nadName,
@@ -483,7 +482,7 @@ func dummyLayer2PrimaryUserDefinedNetwork(subnets string) secondaryNetInfo {
 }
 
 func newSecondaryLayer2NetworkController(cnci *CommonNetworkControllerInfo, netInfo util.NetInfo, nodeName string,
-	nadController *networkAttachDefController.NetAttachDefinitionController) *SecondaryLayer2NetworkController {
+	nadController networkAttachDefController.NADController) *SecondaryLayer2NetworkController {
 	layer2NetworkController := NewSecondaryLayer2NetworkController(cnci, netInfo, nadController)
 	layer2NetworkController.gatewayManagers.Store(
 		nodeName,

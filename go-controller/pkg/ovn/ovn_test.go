@@ -32,7 +32,7 @@ import (
 	egressservicefake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned/fake"
 	udnclientfake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned/fake"
 	nad "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/network-attach-def-controller"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
+	fakenad "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/nad"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
@@ -106,7 +106,6 @@ func NewFakeOVN(useFakeAddressSet bool) *FakeOVN {
 		anpWg:        &sync.WaitGroup{},
 
 		secondaryControllers: map[string]secondaryControllerInfo{},
-		nadController:        &nad.NetAttachDefinitionController{},
 	}
 }
 
@@ -212,28 +211,14 @@ func (o *FakeOVN) init(nadList []nettypes.NetworkAttachmentDefinition) {
 		o.fakeRecorder, o.wg)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	o.controller.multicastSupport = config.EnableMulticast
+	o.nadController = o.controller.nadController.(*nad.NetAttachDefinitionController)
 
 	setupCOPP := false
 	setupClusterController(o.controller, setupCOPP)
-
-	primaryNetworks := syncmap.NewSyncMap[map[string]util.NetInfo]()
-	for _, existingNAD := range nadList {
-		nadNetworks := map[string]util.NetInfo{}
-		if nets, loaded := primaryNetworks.Load(existingNAD.Namespace); loaded {
-			nadNetworks = nets
-		}
-		nadNetwork, _ := util.ParseNADInfo(&existingNAD)
-		nadNetwork.SetNADs(util.GetNADName(existingNAD.Namespace, existingNAD.Name))
-		if nadNetwork.IsPrimaryNetwork() {
-			nadNetworks[nadNetwork.GetNetworkName()] = nadNetwork
-		}
-		primaryNetworks.Store(existingNAD.Namespace, nadNetworks)
-		err := o.NewSecondaryNetworkController(&existingNAD)
+	for _, n := range nadList {
+		err := o.NewSecondaryNetworkController(&n)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
-
-	o.nadController.SetPrimaryNetworksForTest(primaryNetworks)
-	o.controller.nadController = o.nadController
 
 	err = o.watcher.Start()
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -340,8 +325,13 @@ func NewOvnController(ovnClient *util.OVNMasterClientset, wf *factory.WatchFacto
 		return nil, err
 	}
 
-	nadController := &nad.NetAttachDefinitionController{}
-	nadController.SetPrimaryNetworksForTest(syncmap.NewSyncMap[map[string]util.NetInfo]())
+	var nadController *nad.NetAttachDefinitionController
+	if config.OVNKubernetesFeature.EnableMultiNetwork {
+		nadController, err = nad.NewNetAttachDefinitionController("test", &fakenad.FakeNetworkControllerManager{}, wf, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
 	dnc, err := newDefaultNetworkControllerCommon(cnci, stopChan, wg, addressSetFactory, nadController)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -469,11 +459,11 @@ func (o *FakeOVN) NewSecondaryNetworkController(netattachdef *nettypes.NetworkAt
 			l2Controller.addressSetFactory = asf
 			secondaryController = &l2Controller.BaseSecondaryNetworkController
 		case types.LocalnetTopology:
-			localnetController := NewSecondaryLocalnetNetworkController(cnci, nInfo)
+			localnetController := NewSecondaryLocalnetNetworkController(cnci, nInfo, o.nadController)
 			localnetController.addressSetFactory = asf
 			secondaryController = &localnetController.BaseSecondaryNetworkController
 		default:
-			return fmt.Errorf("topoloty type %s not supported", topoType)
+			return fmt.Errorf("topology type %s not supported", topoType)
 		}
 		ocInfo = secondaryControllerInfo{bnc: secondaryController, asf: asf}
 		o.secondaryControllers[netName] = ocInfo
