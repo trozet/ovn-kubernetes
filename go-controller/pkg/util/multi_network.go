@@ -3,6 +3,7 @@ package util
 import (
 	"errors"
 	"fmt"
+	userdefinednetworkv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	"net"
 	"strings"
 	"sync"
@@ -971,4 +972,16 @@ func DoesNetworkRequireIPAM(netInfo NetInfo) bool {
 func DoesNetworkRequireTunnelIDs(netInfo NetInfo) bool {
 	// Layer2Topology with IC require that we allocate tunnel IDs for each pod
 	return netInfo.TopologyType() == types.Layer2Topology && config.OVNKubernetesFeature.EnableInterconnect
+}
+
+func IsPrimaryNetwork(spec userdefinednetworkv1.UserDefinedNetworkSpec) bool {
+	var role userdefinednetworkv1.NetworkRole
+	switch spec.Topology {
+	case userdefinednetworkv1.NetworkTopologyLayer3:
+		role = spec.Layer3.Role
+	case userdefinednetworkv1.NetworkTopologyLayer2:
+		role = spec.Layer2.Role
+	}
+
+	return role == userdefinednetworkv1.NetworkRolePrimary
 }
