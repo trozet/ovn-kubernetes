@@ -906,9 +906,20 @@ func (oc *SecondaryLayer3NetworkController) addNode(node *corev1.Node) ([]*net.I
 	}
 	if util.IsNetworkSegmentationSupportEnabled() && oc.IsPrimaryNetwork() {
 		isUDNAdvertised := util.IsPodNetworkAdvertisedAtNode(oc, node.Name)
-		if err := oc.addOrUpdateUDNNodeSubnetEgressSNAT(hostSubnets, node, isUDNAdvertised); err != nil {
-			return nil, err
+		hasPodsOnNetwork, err := oc.hasPodsOnNetwork(node.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check for pods attched to OVN network: %w", err)
 		}
+		routerName := oc.GetNetworkScopedClusterRouterName()
+		hasConditionalSNAT, err := oc.hasConditionalSNAT(routerName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check for conditional snats: %w", err)
+		}
+		if hasPodsOnNetwork && hasConditionalSNAT {
+			if err := oc.addOrUpdateUDNNodeSubnetEgressSNAT(hostSubnets, node, isUDNAdvertised); err != nil {
+				return nil, err
+			}
+		} // TODO delete OVN SNATs
 		if !isUDNAdvertised {
 			if util.IsRouteAdvertisementsEnabled() {
 				if err := oc.deleteAdvertisedNetworkIsolation(node.Name); err != nil {

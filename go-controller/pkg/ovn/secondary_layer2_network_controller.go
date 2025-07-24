@@ -587,10 +587,21 @@ func (oc *SecondaryLayer2NetworkController) addUpdateLocalNodeEvent(node *corev1
 					return err
 				}
 				isUDNAdvertised := util.IsPodNetworkAdvertisedAtNode(oc, node.Name)
-				err = oc.addOrUpdateUDNClusterSubnetEgressSNAT(gwConfig.hostSubnets, gwManager.gwRouterName, isUDNAdvertised)
+				hasPodsOnNetwork, err := oc.hasPodsOnNetwork(node.Name)
 				if err != nil {
-					return err
+					return fmt.Errorf("failed to check for pods attched to OVN network: %w", err)
 				}
+				routerName := oc.GetNetworkScopedClusterRouterName()
+				hasConditionalSNAT, err := oc.hasConditionalSNAT(routerName)
+				if err != nil {
+					return fmt.Errorf("failed to check for conditional snats: %w", err)
+				}
+				if hasPodsOnNetwork && hasConditionalSNAT {
+					err = oc.addOrUpdateUDNClusterSubnetEgressSNAT(gwConfig.hostSubnets, gwManager.gwRouterName, isUDNAdvertised)
+					if err != nil {
+						return err
+					}
+				} // TODO else should delete the SNAT
 				if !isUDNAdvertised {
 					if util.IsRouteAdvertisementsEnabled() {
 						if err = oc.deleteAdvertisedNetworkIsolation(node.Name); err != nil {
