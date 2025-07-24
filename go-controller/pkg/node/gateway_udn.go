@@ -147,6 +147,142 @@ func NewUserDefinedNetworkGateway(netInfo util.NetInfo, node *corev1.Node, nodeL
 	}, nil
 }
 
+// GetUDNMasqChain reutrns the UDN masq chain name
+func GetUDNMasqChain(mpx string) string {
+	return "udn-masq-" + mpx
+}
+
+func GetUDNMasqPreChain(mpx string) string {
+	return "udn-masq-pre-" + mpx
+}
+
+// delMasqChain removes the UDN packet mark nftables chain
+func (udng *UserDefinedNetworkGateway) delMasqChain() error {
+	mpxInterfaceName := util.GetNetworkScopedK8sMgmtHostIntfName(uint(udng.GetNetworkID()))
+	nft, err := nodenft.GetNFTablesHelper()
+	if err != nil {
+		return err
+	}
+	tx := nft.NewTransaction()
+	chain := &knftables.Chain{
+		Name: GetUDNMasqChain(mpxInterfaceName),
+	}
+	// Delete would return an error if we tried to delete a chain that didn't exist, so
+	// we do an Add first (which is a no-op if the chain already exists) and then Delete.
+	tx.Add(chain)
+	tx.Delete(chain)
+	chain = &knftables.Chain{
+		Name: GetUDNMasqPreChain(mpxInterfaceName),
+	}
+	tx.Add(chain)
+	tx.Delete(chain)
+	return nft.Run(context.TODO(), tx)
+}
+
+// addMasqChain adds the UDN nftables chain containing a rule that masquerades pod subnet -> masq subnet
+func (udng *UserDefinedNetworkGateway) addMasqChain() error {
+	counterIfDebug := ""
+	if config.Logging.Level > 4 {
+		counterIfDebug = "counter"
+	}
+	mpxInterfaceName := util.GetNetworkScopedK8sMgmtHostIntfName(uint(udng.GetNetworkID()))
+
+	nft, err := nodenft.GetNFTablesHelper()
+	if err != nil {
+		return err
+	}
+	tx := nft.NewTransaction()
+	// TODO: check priority here and make sure there wont be collisions with egress service/ip.
+	// The local gw SNAT happens at 101 priority, so it will happen after this SNAT
+	chain := &knftables.Chain{
+		Name:     GetUDNMasqChain(mpxInterfaceName),
+		Type:     ptr.To(knftables.NATType),
+		Hook:     ptr.To(knftables.PostroutingHook),
+		Priority: ptr.To(knftables.SNATPriority),
+		Comment:  ptr.To(fmt.Sprintf("%s: UDN masquerading", udng.GetNetworkName())),
+	}
+	tx.Add(chain)
+	tx.Flush(chain)
+
+	// need prerouting chain to mark the packets, as SNAT can only be done in postrouting and we've lost VRF context
+	// at that point
+	preroutingChain := &knftables.Chain{
+		Name:     GetUDNMasqPreChain(mpxInterfaceName), // chain name you choose
+		Type:     ptr.To(knftables.FilterType),         // filter chains for marking
+		Hook:     ptr.To(knftables.PreroutingHook),     // prerouting hook (incoming packets)
+		Priority: ptr.To(knftables.FilterPriority),     // priority 0 (filter)
+		Comment:  ptr.To("Mark packets in prerouting for VRF identification"),
+	}
+	tx.Add(preroutingChain)
+	tx.Flush(preroutingChain)
+
+	isUDNAdvertised := util.IsPodNetworkAdvertisedAtNode(udng.NetInfo, udng.node.Name)
+	var optionalDestRules []string
+
+	podSubnets, err := udng.getLocalSubnets()
+	if err != nil {
+		return fmt.Errorf("failed to get pod subnets for network %s: %w", udng.GetNetworkName(), err)
+	}
+
+	if len(podSubnets) == 0 {
+		return fmt.Errorf("cannot determine pod subnets while configuring masquerade nftables chain for network: %s", udng.GetNetworkName())
+	}
+	// HACK: offset regular mark by 10k to avoid collision with current mark rules, this should be fixed later
+	mark := udng.pktMark + 10000
+	for _, podSubnet := range podSubnets {
+		ipPrefix := "ip"
+		nfproto := "ipv4"
+		masqIP := udng.v4MasqIPs.ManagementPort.IP
+		remoteNodeSetName := types.NFTRemoteNodeIPsv4
+		if utilnet.IsIPv6CIDR(podSubnet) {
+			ipPrefix = "ip6"
+			nfproto = "ipv6"
+			masqIP = udng.v6MasqIPs.ManagementPort.IP
+			remoteNodeSetName = types.NFTRemoteNodeIPsv6
+		}
+		if isUDNAdvertised {
+			optionalDestRules = []string{ipPrefix, "daddr", "@", remoteNodeSetName}
+		}
+		// prerouting rule
+		// CT Mark packets on ingress
+		tx.Add(&knftables.Rule{
+			Chain: preroutingChain.Name,
+			Rule: knftables.Concat(
+				"iifname", mpxInterfaceName,
+				ipPrefix, "saddr", podSubnet.String(),
+				optionalDestRules,
+				"ct", "mark", "set", fmt.Sprintf("0x%x", mark),
+				counterIfDebug,
+			),
+		})
+
+		// SNAT on egress matching the CT mark
+		tx.Add(&knftables.Rule{
+			Chain: chain.Name,
+			Rule: knftables.Concat(
+				"meta", "nfproto", nfproto,
+				"ct", "mark", fmt.Sprintf("0x%x", mark),
+				counterIfDebug,
+				"snat", "to", masqIP,
+			),
+		})
+
+		// For reply handling set CT mark to fw mark
+		// We need this to steer traffic with ip rules back into the right VRF. Without it
+		// the double unSNAT will take place (nodeip -> masq, then masq -> pod IP) before ip rule/route lookup,
+		// causing route lookup to hit the default table
+		tx.Add(&knftables.Rule{
+			Chain: preroutingChain.Name,
+			Rule: knftables.Concat(
+				"ct", "mark", fmt.Sprintf("0x%x", mark), "meta mark set", fmt.Sprintf("0x%x", mark),
+				counterIfDebug,
+			),
+		})
+	}
+
+	return nft.Run(context.TODO(), tx)
+}
+
 // GetUDNMarkChain returns the UDN mark chain name
 func GetUDNMarkChain(pktMark string) string {
 	return "udn-mark-" + pktMark
@@ -280,7 +416,11 @@ func (udng *UserDefinedNetworkGateway) AddNetwork() error {
 	}
 
 	if err := udng.addMarkChain(); err != nil {
-		return fmt.Errorf("failed to add the service masquerade chain: %w", err)
+		return fmt.Errorf("failed to add the service mark nftables chain: %w", err)
+	}
+
+	if err := udng.addMasqChain(); err != nil {
+		return fmt.Errorf("failed to add the UDN masquerade nftables chain: %w ", err)
 	}
 
 	// run gateway reconciliation loop on network configuration changes
@@ -324,6 +464,11 @@ func (udng *UserDefinedNetworkGateway) DelNetwork() error {
 	if err := udng.delMarkChain(); err != nil {
 		return err
 	}
+
+	if err := udng.delMasqChain(); err != nil {
+		return err
+	}
+
 	// delete the management port interface for this network
 	err := udng.deleteUDNManagementPort()
 	if err != nil {
@@ -675,6 +820,7 @@ func (udng *UserDefinedNetworkGateway) constructUDNVRFIPRules(isNetworkAdvertise
 	if masqIPv4 != nil {
 		addIPRules = append(addIPRules, generateIPRuleForPacketMark(udng.pktMark, false, uint(udng.vrfTableId)))
 		masqIPRules = append(masqIPRules, generateIPRuleForMasqIP(masqIPv4.IP, false, uint(udng.vrfTableId)))
+		addIPRules = append(addIPRules, generateIPRuleForPacketMark(udng.pktMark+10000, false, uint(udng.vrfTableId)))
 		for _, subnet := range udng.Subnets() {
 			if utilnet.IsIPv4CIDR(subnet.CIDR) {
 				subnetIPRules = append(subnetIPRules, generateIPRuleForUDNSubnet(subnet.CIDR, false, uint(udng.vrfTableId)))
@@ -683,6 +829,7 @@ func (udng *UserDefinedNetworkGateway) constructUDNVRFIPRules(isNetworkAdvertise
 	}
 	if masqIPv6 != nil {
 		addIPRules = append(addIPRules, generateIPRuleForPacketMark(udng.pktMark, true, uint(udng.vrfTableId)))
+		addIPRules = append(addIPRules, generateIPRuleForPacketMark(udng.pktMark+10000, false, uint(udng.vrfTableId)))
 		masqIPRules = append(masqIPRules, generateIPRuleForMasqIP(masqIPv6.IP, true, uint(udng.vrfTableId)))
 		for _, subnet := range udng.Subnets() {
 			if utilnet.IsIPv6CIDR(subnet.CIDR) {
