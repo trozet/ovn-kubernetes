@@ -225,7 +225,7 @@ const (
 	// RequiredUDNNamespaceLabel is the required namespace label for enabling primary UDNs
 	RequiredUDNNamespaceLabel = "k8s.ovn.org/primary-user-defined-network"
 
-	// different secondary network topology type defined in CNI netconf
+	// different User Defined Network topology types defined in CNI netconf
 	Layer3Topology   = "layer3"
 	Layer2Topology   = "layer2"
 	LocalnetTopology = "localnet"
