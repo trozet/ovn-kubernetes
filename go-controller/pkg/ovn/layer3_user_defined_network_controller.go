@@ -72,7 +72,7 @@ func (h *Layer3UserDefinedNetworkControllerEventHandler) RecordAddEvent(obj inte
 	h.baseHandler.recordAddEvent(h.objType, obj)
 }
 
-// RecordUpdateEvent records the udpate event on this given object.
+// RecordUpdateEvent records the update event on this given object.
 func (h *Layer3UserDefinedNetworkControllerEventHandler) RecordUpdateEvent(obj interface{}) {
 	h.baseHandler.recordUpdateEvent(h.objType, obj)
 }
@@ -88,7 +88,8 @@ func (h *Layer3UserDefinedNetworkControllerEventHandler) RecordSuccessEvent(obj 
 }
 
 // RecordErrorEvent records the error event on this given object.
-func (h *Layer3UserDefinedNetworkControllerEventHandler) RecordErrorEvent(_ interface{}, _ string, _ error) {
+func (h *Layer3UserDefinedNetworkControllerEventHandler) RecordErrorEvent(obj interface{}, reason string, err error) {
+	h.baseHandler.RecordErrorEvent(h.objType, obj, reason, err)
 }
 
 // IsResourceScheduled returns true if the given object has been scheduled.

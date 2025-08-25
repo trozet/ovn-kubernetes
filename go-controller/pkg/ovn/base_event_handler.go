@@ -18,7 +18,9 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 )
 
-type baseNetworkControllerEventHandler struct{}
+type baseNetworkControllerEventHandler struct {
+	oc *BaseNetworkController
+}
 
 // hasResourceAnUpdateFunc returns true if the given resource type has a dedicated update function.
 // It returns false if, upon an update event on this resource type, we instead need to first delete the old
@@ -259,6 +261,20 @@ func (h *baseNetworkControllerEventHandler) recordSuccessEvent(objType reflect.T
 	case factory.MultiNetworkPolicyType:
 		mnp := obj.(*mnpapi.MultiNetworkPolicy)
 		klog.V(5).Infof("Recording success event on multinetwork policy %s/%s", mnp.Namespace, mnp.Name)
+		recorders.GetConfigDurationRecorder().End("multinetworkpolicy", mnp.Namespace, mnp.Name)
+	}
+}
+
+// RecordErrorEvent records an error event on the given object.
+func (h *baseNetworkControllerEventHandler) RecordErrorEvent(objType reflect.Type, obj interface{}, reason string, err error) {
+	switch objType {
+	case factory.PolicyType:
+		np := obj.(*knet.NetworkPolicy)
+		klog.V(5).Infof("Recording error event on network policy %s/%s", np.Namespace, np.Name)
+		h.oc.recordNetworkPolicyEvent(reason, err, np)
+	case factory.MultiNetworkPolicyType:
+		mnp := obj.(*mnpapi.MultiNetworkPolicy)
+		klog.V(5).Infof("Recording error event on multinetwork policy %s/%s", mnp.Namespace, mnp.Name)
 		recorders.GetConfigDurationRecorder().End("multinetworkpolicy", mnp.Namespace, mnp.Name)
 	}
 }

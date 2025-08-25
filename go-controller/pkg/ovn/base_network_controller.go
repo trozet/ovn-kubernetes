@@ -1213,3 +1213,14 @@ func (bnc *BaseNetworkController) GetSamplingConfig() *libovsdbops.SamplingConfi
 	}
 	return nil
 }
+
+func (bnc *BaseNetworkController) recordNetworkPolicyEvent(reason string, addErr error, np *knet.NetworkPolicy) {
+	npRef, err := ref.GetReference(scheme.Scheme, np)
+	if err != nil {
+		klog.Errorf("Couldn't get a reference to pod %s/%s to post an event: '%v'",
+			np.Namespace, np.Name, err)
+	} else {
+		klog.V(5).Infof("Posting a %s event for Network Policy %s/%s", corev1.EventTypeWarning, np.Namespace, np.Name)
+		bnc.recorder.Eventf(npRef, corev1.EventTypeWarning, reason, addErr.Error())
+	}
+}

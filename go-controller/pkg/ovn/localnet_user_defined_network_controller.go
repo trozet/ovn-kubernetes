@@ -69,23 +69,24 @@ func (h *LocalnetUserDefinedNetworkControllerEventHandler) RecordAddEvent(obj in
 	}
 }
 
-// RecordUpdateEvent records the udpate event on this given object.
+// RecordUpdateEvent records the update event on this given object.
 func (h *LocalnetUserDefinedNetworkControllerEventHandler) RecordUpdateEvent(obj interface{}) {
-	h.baseHandler.recordAddEvent(h.objType, obj)
+	h.baseHandler.recordUpdateEvent(h.objType, obj)
 }
 
 // RecordDeleteEvent records the delete event on this given object.
 func (h *LocalnetUserDefinedNetworkControllerEventHandler) RecordDeleteEvent(obj interface{}) {
-	h.baseHandler.recordAddEvent(h.objType, obj)
+	h.baseHandler.recordDeleteEvent(h.objType, obj)
 }
 
 // RecordSuccessEvent records the success event on this given object.
 func (h *LocalnetUserDefinedNetworkControllerEventHandler) RecordSuccessEvent(obj interface{}) {
-	h.baseHandler.recordAddEvent(h.objType, obj)
+	h.baseHandler.recordSuccessEvent(h.objType, obj)
 }
 
 // RecordErrorEvent records the error event on this given object.
-func (h *LocalnetUserDefinedNetworkControllerEventHandler) RecordErrorEvent(_ interface{}, _ string, _ error) {
+func (h *LocalnetUserDefinedNetworkControllerEventHandler) RecordErrorEvent(obj interface{}, reason string, err error) {
+	h.baseHandler.RecordErrorEvent(h.objType, obj, reason, err)
 }
 
 // IsResourceScheduled returns true if the given object has been scheduled.
