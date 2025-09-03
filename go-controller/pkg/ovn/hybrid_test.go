@@ -23,7 +23,6 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
 	hotypes "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
-	cm "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	egressfirewallfake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned/fake"
 	egressipfake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned/fake"
@@ -188,7 +187,7 @@ var _ = ginkgo.Describe("Hybrid SDN Master Operations", func() {
 			dbSetup := libovsdbtest.TestSetup{}
 			kubeFakeClient := fake.NewSimpleClientset(&corev1.NodeList{
 				Items: []corev1.Node{
-					newTestNode(nodeName, "windows", "", "", ""),
+					newTestNode(nodeName, "windows", "", nodeSubnet, ""),
 				},
 			})
 			egressFirewallFakeClient := &egressfirewallfake.Clientset{}
@@ -224,13 +223,6 @@ var _ = ginkgo.Describe("Hybrid SDN Master Operations", func() {
 				NewPortCache(stopChan),
 			)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			c, cancel := context.WithCancel(ctx.Context)
-			defer cancel()
-			clusterManager, err := cm.NewClusterManager(fakeClient.GetClusterManagerClientset(), f, "identity", nil)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			err = clusterManager.Start(c)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			defer clusterManager.Stop()
 			gomega.Expect(clusterController.WatchNodes()).To(gomega.Succeed())
 
 			// Windows node should be allocated a subnet
@@ -395,15 +387,6 @@ var _ = ginkgo.Describe("Hybrid SDN Master Operations", func() {
 
 			//assuming all the pods have finished processing
 			atomic.StoreUint32(&clusterController.allInitialPodsProcessed, 1)
-
-			c, cancel := context.WithCancel(ctx.Context)
-			defer cancel()
-			clusterManager, err := cm.NewClusterManager(fakeClient.GetClusterManagerClientset(), f, "identity", nil)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			gomega.Expect(clusterManager).NotTo(gomega.BeNil())
-			err = clusterManager.Start(c)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			defer clusterManager.Stop()
 
 			// Let the real code run and ensure OVN database sync
 			gomega.Expect(clusterController.WatchNodes()).To(gomega.Succeed())
@@ -703,16 +686,6 @@ var _ = ginkgo.Describe("Hybrid SDN Master Operations", func() {
 			//assuming all the pods have finished processing
 			atomic.StoreUint32(&clusterController.allInitialPodsProcessed, 1)
 			// Let the real code run and ensure OVN database sync
-
-			c, cancel := context.WithCancel(ctx.Context)
-			defer cancel()
-			clusterManager, err := cm.NewClusterManager(fakeClient.GetClusterManagerClientset(), f, "identity", nil)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			gomega.Expect(clusterManager).NotTo(gomega.BeNil())
-			err = clusterManager.Start(c)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			defer clusterManager.Stop()
-
 			gomega.Expect(clusterController.WatchNodes()).To(gomega.Succeed())
 
 			gomega.Eventually(func() (map[string]string, error) {
@@ -879,15 +852,6 @@ var _ = ginkgo.Describe("Hybrid SDN Master Operations", func() {
 			//assuming all the pods have finished processing
 			atomic.StoreUint32(&clusterController.allInitialPodsProcessed, 1)
 			// Let the real code run and ensure OVN database sync
-
-			c, cancel := context.WithCancel(ctx.Context)
-			defer cancel()
-			clusterManager, err := cm.NewClusterManager(fakeClient.GetClusterManagerClientset(), f, "identity", nil)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			gomega.Expect(clusterManager).NotTo(gomega.BeNil())
-			err = clusterManager.Start(c)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			defer clusterManager.Stop()
 
 			gomega.Expect(clusterController.WatchNodes()).To(gomega.Succeed())
 
@@ -1171,15 +1135,6 @@ var _ = ginkgo.Describe("Hybrid SDN Master Operations", func() {
 			atomic.StoreUint32(&clusterController.allInitialPodsProcessed, 1)
 			// Let the real code run and ensure OVN database sync
 
-			c, cancel := context.WithCancel(ctx.Context)
-			defer cancel()
-			clusterManager, err := cm.NewClusterManager(fakeClient.GetClusterManagerClientset(), f, "identity", nil)
-			gomega.Expect(clusterManager).NotTo(gomega.BeNil())
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			err = clusterManager.Start(c)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			defer clusterManager.Stop()
-
 			gomega.Expect(clusterController.WatchNodes()).To(gomega.Succeed())
 
 			// switch the node to a HO node
@@ -1378,15 +1333,6 @@ var _ = ginkgo.Describe("Hybrid SDN Master Operations", func() {
 			//assuming all the pods have finished processing
 			atomic.StoreUint32(&clusterController.allInitialPodsProcessed, 1)
 			// Let the real code run and ensure OVN database sync
-
-			c, cancel := context.WithCancel(ctx.Context)
-			defer cancel()
-			clusterManager, err := cm.NewClusterManager(fakeClient.GetClusterManagerClientset(), f, "identity", nil)
-			gomega.Expect(clusterManager).NotTo(gomega.BeNil())
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			err = clusterManager.Start(c)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			defer clusterManager.Stop()
 
 			gomega.Expect(clusterController.WatchNodes()).To(gomega.Succeed())
 

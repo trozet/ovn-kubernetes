@@ -561,16 +561,6 @@ func (oc *Layer3UserDefinedNetworkController) run() error {
 	klog.Infof("Starting all the Watchers for network %s ...", oc.GetNetworkName())
 	start := time.Now()
 
-	// WatchNamespaces() should be started first because it has no other
-	// dependencies, and WatchNodes() depends on it
-	if err := oc.WatchNamespaces(); err != nil {
-		return err
-	}
-
-	if err := oc.WatchNodes(); err != nil {
-		return err
-	}
-
 	if oc.svcController != nil {
 		startSvc := time.Now()
 		// Services should be started after nodes to prevent LB churn
@@ -579,24 +569,6 @@ func (oc *Layer3UserDefinedNetworkController) run() error {
 
 		metrics.MetricOVNKubeControllerSyncDuration.WithLabelValues("service_" + oc.GetNetworkName()).Set(endSvc.Seconds())
 		if err != nil {
-			return err
-		}
-	}
-
-	if err := oc.WatchPods(); err != nil {
-		return err
-	}
-
-	if util.IsMultiNetworkPoliciesSupportEnabled() && !oc.IsPrimaryNetwork() {
-		// WatchMultiNetworkPolicy depends on WatchPods and WatchNamespaces
-		if err := oc.WatchMultiNetworkPolicy(); err != nil {
-			return err
-		}
-	}
-
-	if oc.IsPrimaryNetwork() {
-		// WatchNetworkPolicy depends on WatchPods and WatchNamespaces
-		if err := oc.WatchNetworkPolicy(); err != nil {
 			return err
 		}
 	}

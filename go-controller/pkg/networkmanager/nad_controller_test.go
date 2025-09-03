@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 
@@ -18,7 +17,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
@@ -30,33 +28,82 @@ import (
 )
 
 type testNetworkController struct {
+	sync.Mutex
 	util.ReconcilableNetInfo
-	tcm *testControllerManager
+	tcm             ControllerManager
+	networks        map[string]util.MutableNetInfo
+	name            string
+	deletedNetworks map[string]bool
+}
+
+func NewNetworkController(_, _, _ string, cm ControllerManager, _ *factory.WatchFactory) UDNController {
+	return &testNetworkController{
+		networks:            make(map[string]util.MutableNetInfo),
+		tcm:                 cm,
+		ReconcilableNetInfo: &util.DefaultNetInfo{},
+		deletedNetworks:     make(map[string]bool),
+	}
 }
 
 func (tnc *testNetworkController) Start(context.Context) error {
-	tnc.tcm.Lock()
-	defer tnc.tcm.Unlock()
-	fmt.Printf("starting network: %s\n", testNetworkKey(tnc))
-	tnc.tcm.started = append(tnc.tcm.started, testNetworkKey(tnc))
-	return nil
+	tcm := tnc.tcm.(*testControllerManager)
+	tcm.Lock()
+	defer tcm.Unlock()
+	fmt.Printf("starting network controller: %s\n", tnc.name)
+	networks := tnc.GetAllNetworks()
+	netInfos := make([]util.NetInfo, 0, len(networks))
+	for _, network := range networks {
+		netInfos = append(netInfos, tnc.GetNetworkFromCurrentState(network))
+	}
+	return tcm.CleanupStaleNetworks(netInfos...)
 }
 
 func (tnc *testNetworkController) Stop() {
-	tnc.tcm.Lock()
-	defer tnc.tcm.Unlock()
-	tnc.tcm.stopped = append(tnc.tcm.stopped, testNetworkKey(tnc))
 }
 
 func (tnc *testNetworkController) Cleanup() error {
-	tnc.tcm.Lock()
-	defer tnc.tcm.Unlock()
-	tnc.tcm.cleaned = append(tnc.tcm.cleaned, testNetworkKey(tnc))
 	return nil
 }
 
 func (tnc *testNetworkController) Reconcile(netInfo util.NetInfo) error {
 	return util.ReconcileNetInfo(tnc.ReconcilableNetInfo, netInfo)
+}
+
+func (tnc *testNetworkController) EnsureNetwork(network util.MutableNetInfo) {
+	tnc.Lock()
+	defer tnc.Unlock()
+	tnc.networks[network.GetNetworkName()] = network
+}
+
+func (tnc *testNetworkController) DeleteNetwork(network string) {
+	tnc.Lock()
+	defer tnc.Unlock()
+	delete(tnc.networks, network)
+	tnc.deletedNetworks[network] = true
+}
+func (tnc *testNetworkController) GetNetworkFromInformer(network string) util.MutableNetInfo {
+	tnc.Lock()
+	defer tnc.Unlock()
+	return tnc.networks[network]
+}
+func (tnc *testNetworkController) GetRunningNetwork(_ int) string {
+	return ""
+}
+
+func (tnc *testNetworkController) GetNetworkFromCurrentState(network string) util.NetInfo {
+	tnc.Lock()
+	defer tnc.Unlock()
+	return tnc.networks[network]
+}
+
+func (tnc *testNetworkController) GetAllNetworks() []string {
+	tnc.Lock()
+	defer tnc.Unlock()
+	nets := []string{}
+	for network := range tnc.networks {
+		nets = append(nets, network)
+	}
+	return nets
 }
 
 // GomegaString is used to avoid printing embedded mutexes which can cause a
@@ -69,19 +116,11 @@ func testNetworkKey(nInfo util.NetInfo) string {
 	return nInfo.GetNetworkName() + " " + nInfo.TopologyType()
 }
 
-func networkFromTestNetworkKey(key string) string {
-	return key[:strings.LastIndex(key, " ")]
-}
-
 type testControllerManager struct {
 	sync.Mutex
 
 	defaultNetwork *testNetworkController
 	controllers    map[string]NetworkController
-
-	started []string
-	stopped []string
-	cleaned []string
 
 	raiseErrorWhenCreatingController error
 
@@ -97,6 +136,8 @@ func (tcm *testControllerManager) NewNetworkController(netInfo util.NetInfo) (Ne
 	t := &testNetworkController{
 		ReconcilableNetInfo: util.NewReconcilableNetInfo(netInfo),
 		tcm:                 tcm,
+		networks:            map[string]util.MutableNetInfo{},
+		name:                "udn",
 	}
 	tcm.controllers[testNetworkKey(netInfo)] = t
 	return t, nil
@@ -496,13 +537,22 @@ func TestNADController(t *testing.T) {
 				controllers: map[string]NetworkController{},
 				defaultNetwork: &testNetworkController{
 					ReconcilableNetInfo: &util.DefaultNetInfo{},
+					networks:            map[string]util.MutableNetInfo{},
+					name:                "default",
+					deletedNetworks:     map[string]bool{},
 				},
 			}
 			fakeClient := util.GetOVNClientset().GetClusterManagerClientset()
 			nadController := &nadController{
-				nads:               map[string]string{},
-				primaryNADs:        map[string]string{},
-				networkController:  newNetworkController("", "", "", tcm, nil),
+				nads:        map[string]string{},
+				primaryNADs: map[string]string{},
+				networkController: &testNetworkController{
+					tcm:                 tcm,
+					networks:            map[string]util.MutableNetInfo{},
+					ReconcilableNetInfo: &util.DefaultNetInfo{},
+					name:                "udn",
+					deletedNetworks:     map[string]bool{},
+				},
 				networkIDAllocator: id.NewIDAllocator("NetworkIDs", MaxNetworks),
 				nadClient:          fakeClient.NetworkAttchDefClient,
 				namespaceLister:    &fakeNamespaceLister{},
@@ -511,7 +561,7 @@ func TestNADController(t *testing.T) {
 			g.Expect(err).ToNot(gomega.HaveOccurred())
 			netController := nadController.networkController
 
-			g.Expect(nadController.networkController.Start()).To(gomega.Succeed())
+			g.Expect(nadController.networkController.Start(context.Background())).To(gomega.Succeed())
 			defer nadController.networkController.Stop()
 
 			for _, args := range tt.args {
@@ -537,43 +587,28 @@ func TestNADController(t *testing.T) {
 
 			meetsExpectations := func(g gomega.Gomega) {
 				// test that the manager has all the desired networks
-				g.Expect(netController.getAllNetworks()).To(gomega.HaveLen(len(tt.expected)))
+				g.Expect(netController.GetAllNetworks()).To(gomega.HaveLen(len(tt.expected)))
 
-				var expectRunning []string
 				for _, expected := range tt.expected {
 					netInfo, err := util.NewNetInfo(expected.network)
 					g.Expect(err).ToNot(gomega.HaveOccurred())
 
 					name := netInfo.GetNetworkName()
-					testNetworkKey := testNetworkKey(netInfo)
 					func() {
-						netController.Lock()
-						defer netController.Unlock()
 						tcm.Lock()
 						defer tcm.Unlock()
 
 						// test that the desired networks have the expected
 						// config and NADs, including the default network which
 						// could have had NAD/Advertisement changes as well
-						g.Expect(netController.networks).To(gomega.HaveKey(name))
-						g.Expect(util.AreNetworksCompatible(netController.networks[name], netInfo)).To(gomega.BeTrue(),
+						g.Expect(netController.GetAllNetworks()).To(gomega.ContainElement(name))
+						g.Expect(util.AreNetworksCompatible(netController.GetNetworkFromCurrentState(name), netInfo)).To(gomega.BeTrue(),
 							fmt.Sprintf("matching network config for network %s", name))
-						g.Expect(netController.networks[name].GetNADs()).To(gomega.ConsistOf(expected.nads),
+						g.Expect(netController.GetNetworkFromCurrentState(name).GetNADs()).To(gomega.ConsistOf(expected.nads),
 							fmt.Sprintf("matching NADs for network %s", name))
 						id, err := nadController.networkIDAllocator.AllocateID(name)
 						g.Expect(err).ToNot(gomega.HaveOccurred())
-						g.Expect(netController.networks[name].GetNetworkID()).To(gomega.Equal(id))
-
-						// test that the actual controllers have the expected config and NADs
-						if !netInfo.IsDefault() {
-							g.Expect(tcm.controllers).To(gomega.HaveKey(testNetworkKey))
-							g.Expect(util.AreNetworksCompatible(tcm.controllers[testNetworkKey], netInfo)).To(gomega.BeTrue(),
-								fmt.Sprintf("matching network config for network %s", name))
-							g.Expect(tcm.controllers[testNetworkKey].GetNADs()).To(gomega.ConsistOf(expected.nads),
-								fmt.Sprintf("matching NADs for network %s", name))
-							g.Expect(tcm.controllers[testNetworkKey].GetNetworkID()).To(gomega.Equal(id))
-							expectRunning = append(expectRunning, testNetworkKey)
-						}
+						g.Expect(netController.GetNetworkFromCurrentState(name).GetNetworkID()).To(gomega.Equal(id))
 					}()
 					if netInfo.IsPrimaryNetwork() && !netInfo.IsDefault() {
 						key := expected.nads[0]
@@ -587,17 +622,11 @@ func TestNADController(t *testing.T) {
 				}
 				tcm.Lock()
 				defer tcm.Unlock()
-				expectStopped := sets.New(tcm.started...).Difference(sets.New(expectRunning...)).UnsortedList()
-				// test that the controllers are started, stopped and cleaned up as expected
-				g.Expect(tcm.started).To(gomega.ContainElements(expectRunning), "started network controllers")
-				g.Expect(tcm.stopped).To(gomega.ConsistOf(expectStopped), "stopped network controllers")
-				g.Expect(tcm.cleaned).To(gomega.ConsistOf(expectStopped), "cleaned up network controllers")
 
 				// if we reallocate all stopped networks, they should get a higher id than base if the previous id was released
 				base, err := nadController.networkIDAllocator.AllocateID("test")
 				g.Expect(err).ToNot(gomega.HaveOccurred())
-				for _, stopped := range expectStopped {
-					network := networkFromTestNetworkKey(stopped)
+				for network := range nadController.networkController.(*testNetworkController).deletedNetworks {
 					if nadController.GetNetwork(network) != nil {
 						// this network is still running under different config
 						continue
@@ -694,6 +723,7 @@ func TestSyncAll(t *testing.T) {
 			controller, err := NewForCluster(
 				tcm,
 				wf,
+				NewNetworkController,
 				fakeClient,
 				nil,
 			)

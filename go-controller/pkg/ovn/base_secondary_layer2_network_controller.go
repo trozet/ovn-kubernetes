@@ -98,45 +98,6 @@ func (oc *BaseLayer2UserDefinedNetworkController) cleanup() error {
 }
 
 func (oc *BaseLayer2UserDefinedNetworkController) run() error {
-	// WatchNamespaces() should be started first because it has no other
-	// dependencies, and WatchNodes() depends on it
-	if err := oc.WatchNamespaces(); err != nil {
-		return err
-	}
-
-	if err := oc.WatchNodes(); err != nil {
-		return err
-	}
-
-	// when on IC, it will be the NetworkController that returns the IPAMClaims
-	// IPs back to the pool
-	if oc.allocatesPodAnnotation() && oc.allowPersistentIPs() {
-		// WatchIPAMClaims should be started before WatchPods to prevent OVN-K
-		// master assigning IPs to pods without taking into account the persistent
-		// IPs set aside for the IPAMClaims
-		if err := oc.WatchIPAMClaims(); err != nil {
-			return err
-		}
-	}
-
-	if err := oc.WatchPods(); err != nil {
-		return err
-	}
-
-	if util.IsMultiNetworkPoliciesSupportEnabled() && !oc.IsPrimaryNetwork() {
-		// WatchMultiNetworkPolicy depends on WatchPods and WatchNamespaces
-		if err := oc.WatchMultiNetworkPolicy(); err != nil {
-			return err
-		}
-	}
-
-	if oc.IsPrimaryNetwork() {
-		// WatchNetworkPolicy depends on WatchPods and WatchNamespaces
-		if err := oc.WatchNetworkPolicy(); err != nil {
-			return err
-		}
-	}
-
 	// start NetworkQoS controller if feature is enabled
 	if config.OVNKubernetesFeature.EnableNetworkQoS {
 		err := oc.newNetworkQoSController()

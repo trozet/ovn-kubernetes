@@ -24,6 +24,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/iprulemanager"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/routemanager"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/vrfmanager"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn"
 	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 )
@@ -120,7 +121,7 @@ func NewNodeControllerManager(ovnClient *util.OVNClientset, wf factory.NodeWatch
 	var err error
 	ncm.networkManager = networkmanager.Default()
 	if isNetworkManagerRequiredForNode() {
-		ncm.networkManager, err = networkmanager.NewForNode(name, ncm, wf)
+		ncm.networkManager, err = networkmanager.NewForNode(name, ncm, wf, ovn.NewNodeNetworkController)
 		if err != nil {
 			return nil, err
 		}

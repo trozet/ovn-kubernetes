@@ -98,6 +98,21 @@ func (bnc *BaseNetworkController) WatchNamespaces() error {
 	return err
 }
 
+// WatchNamespacesForce starts the watching of namespace resource and calls
+// back the appropriate handler logic
+func (bnc *BaseNetworkController) WatchNamespacesForce() error {
+	if bnc.namespaceHandler != nil {
+		return nil
+	}
+
+	handler, err := bnc.retryNamespaces.WatchResource()
+	if err != nil {
+		return err
+	}
+	bnc.namespaceHandler = handler
+	return err
+}
+
 // aclLoggingUpdateNsInfo parses the provided annotation values and sets nsInfo.aclLogging.Deny and
 // nsInfo.aclLogging.Allow. If errors are encountered parsing the annotation, disable logging completely. If either
 // value contains invalid input, disable logging for the respective key. This is needed to ensure idempotency.

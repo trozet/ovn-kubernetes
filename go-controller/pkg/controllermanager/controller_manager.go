@@ -256,7 +256,7 @@ func NewControllerManager(ovnClient *util.OVNClientset, wf *factory.WatchFactory
 	var err error
 	cm.networkManager = networkmanager.Default()
 	if config.OVNKubernetesFeature.EnableMultiNetwork {
-		cm.networkManager, err = networkmanager.NewForZone(config.Default.Zone, cm, wf)
+		cm.networkManager, err = networkmanager.NewForZone(config.Default.Zone, cm, wf, ovn.NewNetworkController)
 		if err != nil {
 			return nil, err
 		}

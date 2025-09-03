@@ -6,6 +6,7 @@ import (
 
 	"k8s.io/client-go/tools/record"
 
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 )
@@ -63,20 +64,25 @@ func Default() Controller {
 	return def
 }
 
+type NetworkControllerConstructor func(name, zone, node string, cm ControllerManager, wf *factory.WatchFactory) UDNController
+type NodeNetworkControllerConstructor func(name, zone, node string, cm ControllerManager, wf factory.NodeWatchFactory) UDNController
+
 // NewForCluster builds a controller for cluster manager
 func NewForCluster(
 	cm ControllerManager,
-	wf watchFactory,
+	wf *factory.WatchFactory,
+	ncFunc NetworkControllerConstructor,
 	ovnClient *util.OVNClusterManagerClientset,
 	recorder record.EventRecorder,
 ) (Controller, error) {
-	return new(
+	return newController(
 		"clustermanager-nad-controller",
 		"",
 		"",
 		cm,
 		wf,
 		ovnClient,
+		ncFunc,
 		recorder,
 	)
 }
@@ -85,15 +91,17 @@ func NewForCluster(
 func NewForZone(
 	zone string,
 	cm ControllerManager,
-	wf watchFactory,
+	wf *factory.WatchFactory,
+	ncFunc NetworkControllerConstructor,
 ) (Controller, error) {
-	return new(
+	return newController(
 		"zone-nad-controller",
 		zone,
 		"",
 		cm,
 		wf,
 		nil,
+		ncFunc,
 		nil,
 	)
 }
@@ -102,32 +110,19 @@ func NewForZone(
 func NewForNode(
 	node string,
 	cm ControllerManager,
-	wf watchFactory,
+	wf factory.NodeWatchFactory,
+	ncFunc NodeNetworkControllerConstructor,
 ) (Controller, error) {
-	return new(
+	return newNodeController(
 		"node-nad-controller",
 		"",
 		node,
 		cm,
 		wf,
 		nil,
+		ncFunc,
 		nil,
 	)
-}
-
-// New builds a new Controller. It's aware of networks configured in the system,
-// gathers relevant information about them for the project and handles the
-// lifecycle of their corresponding network controllers.
-func new(
-	name string,
-	zone string,
-	node string,
-	cm ControllerManager,
-	wf watchFactory,
-	ovnClient *util.OVNClusterManagerClientset,
-	recorder record.EventRecorder,
-) (Controller, error) {
-	return newController(name, zone, node, cm, wf, ovnClient, recorder)
 }
 
 // ControllerManager manages controllers. Needs to be provided in order to build
@@ -149,10 +144,6 @@ type ReconcilableNetworkController interface {
 	util.NetInfo
 
 	// Reconcile informs the controller of network configuration changes.
-	// Implementations should not return any error at or after updating this
-	// network information on their as there is nothing network manager can do
-	// about it. In this case implementations should either carry their on
-	// retries or log the error and give up.
 	Reconcile(util.NetInfo) error
 }
 
@@ -169,6 +160,17 @@ type BaseNetworkController interface {
 type NetworkController interface {
 	BaseNetworkController
 	Cleanup() error
+}
+
+type UDNController interface {
+	BaseNetworkController
+	Cleanup() error
+	EnsureNetwork(network util.MutableNetInfo)
+	DeleteNetwork(network string)
+	GetNetworkFromInformer(network string) util.MutableNetInfo
+	GetRunningNetwork(id int) string
+	GetNetworkFromCurrentState(network string) util.NetInfo
+	GetAllNetworks() []string
 }
 
 // defaultNetworkManager assumes the default network is

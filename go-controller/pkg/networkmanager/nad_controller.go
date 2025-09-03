@@ -1,6 +1,7 @@
 package networkmanager
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -9,7 +10,6 @@ import (
 
 	nettypes "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	nadclientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
-	nadinformers "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions/k8s.cni.cncf.io/v1"
 	nadlisters "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
 
 	corev1 "k8s.io/api/core/v1"
@@ -17,7 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
-	coreinformers "k8s.io/client-go/informers/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
@@ -26,24 +25,14 @@ import (
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/controller"
-	rainformers "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/informers/externalversions/routeadvertisements/v1"
-	userdefinednetworkinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/informers/externalversions/userdefinednetwork/v1"
 	userdefinednetworklister "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/listers/userdefinednetwork/v1"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
 	utiludn "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/udn"
 )
-
-type watchFactory interface {
-	NADInformer() nadinformers.NetworkAttachmentDefinitionInformer
-	UserDefinedNetworkInformer() userdefinednetworkinformer.UserDefinedNetworkInformer
-	ClusterUserDefinedNetworkInformer() userdefinednetworkinformer.ClusterUserDefinedNetworkInformer
-	NamespaceInformer() coreinformers.NamespaceInformer
-	RouteAdvertisementsInformer() rainformers.RouteAdvertisementsInformer
-	NodeCoreInformer() coreinformers.NodeInformer
-}
 
 // nadController handles namespaced scoped NAD events and
 // manages cluster scoped networks defined in those NADs. NADs are mostly
@@ -65,7 +54,7 @@ type nadController struct {
 	recorder   record.EventRecorder
 
 	// networkController reconciles network specific controllers
-	networkController *networkController
+	networkController UDNController
 
 	// nads to network mapping
 	nads map[string]string
@@ -82,8 +71,9 @@ func newController(
 	zone string,
 	node string,
 	cm ControllerManager,
-	wf watchFactory,
+	wf *factory.WatchFactory,
 	ovnClient *util.OVNClusterManagerClientset,
+	ncFunc NetworkControllerConstructor,
 	recorder record.EventRecorder,
 ) (*nadController, error) {
 	c := &nadController{
@@ -91,7 +81,69 @@ func newController(
 		recorder:          recorder,
 		nadLister:         wf.NADInformer().Lister(),
 		nodeLister:        wf.NodeCoreInformer().Lister(),
-		networkController: newNetworkController(name, zone, node, cm, wf),
+		networkController: ncFunc(name, zone, node, cm, wf),
+		nads:              map[string]string{},
+		primaryNADs:       map[string]string{},
+	}
+
+	if ovnClient != nil {
+		c.nadClient = ovnClient.NetworkAttchDefClient
+	}
+
+	// this is cluster network manager, so we allocate network IDs
+	if zone == "" && node == "" {
+		c.networkIDAllocator = id.NewIDAllocator("NetworkIDs", MaxNetworks)
+		// Reserve the ID of the default network
+		err := c.networkIDAllocator.ReserveID(types.DefaultNetworkName, types.DefaultNetworkID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to allocate default network ID: %w", err)
+		}
+	}
+
+	config := &controller.ControllerConfig[nettypes.NetworkAttachmentDefinition]{
+		RateLimiter:    workqueue.DefaultTypedControllerRateLimiter[string](),
+		Informer:       wf.NADInformer().Informer(),
+		Lister:         c.nadLister.List,
+		Reconcile:      c.sync,
+		ObjNeedsUpdate: c.nadNeedsUpdate,
+		Threadiness:    1,
+	}
+
+	if util.IsNetworkSegmentationSupportEnabled() {
+		if udnInformer := wf.UserDefinedNetworkInformer(); udnInformer != nil {
+			c.udnLister = udnInformer.Lister()
+		}
+		if cudnInformer := wf.ClusterUserDefinedNetworkInformer(); cudnInformer != nil {
+			c.cudnLister = cudnInformer.Lister()
+		}
+		if nsInformer := wf.NamespaceInformer(); nsInformer != nil {
+			c.namespaceLister = nsInformer.Lister()
+		}
+	}
+	c.controller = controller.NewController(
+		c.name,
+		config,
+	)
+
+	return c, nil
+}
+
+func newNodeController(
+	name string,
+	zone string,
+	node string,
+	cm ControllerManager,
+	wf factory.NodeWatchFactory,
+	ovnClient *util.OVNClusterManagerClientset,
+	ncFunc NodeNetworkControllerConstructor,
+	recorder record.EventRecorder,
+) (*nadController, error) {
+	c := &nadController{
+		name:              fmt.Sprintf("[%s NAD controller]", name),
+		recorder:          recorder,
+		nadLister:         wf.NADInformer().Lister(),
+		nodeLister:        wf.NodeCoreInformer().Lister(),
+		networkController: ncFunc(name, zone, node, cm, wf),
 		nads:              map[string]string{},
 		primaryNADs:       map[string]string{},
 	}
@@ -154,7 +206,7 @@ func (c *nadController) Start() error {
 		return err
 	}
 
-	err = c.networkController.Start()
+	err = c.networkController.Start(context.Background())
 	if err != nil {
 		return err
 	}
@@ -306,10 +358,10 @@ func (c *nadController) syncNAD(key string, nad *nettypes.NetworkAttachmentDefin
 
 	// the NAD refers to a different network than before
 	if nadNetworkName != c.nads[key] {
-		oldNetwork = c.networkController.getNetwork(c.nads[key])
+		oldNetwork = c.networkController.GetNetworkFromInformer(c.nads[key])
 	}
 
-	currentNetwork := c.networkController.getNetwork(nadNetworkName)
+	currentNetwork := c.networkController.GetNetworkFromInformer(nadNetworkName)
 
 	switch {
 	case currentNetwork == nil:
@@ -490,7 +542,7 @@ func (c *nadController) getActiveNetworkForNamespace(namespace string) (util.Net
 	switch primaryNAD {
 	case "":
 		// default network
-		network = c.networkController.getNetwork(types.DefaultNetworkName)
+		network = c.networkController.GetNetworkFromInformer(types.DefaultNetworkName)
 		if network == nil {
 			network = &util.DefaultNetInfo{}
 		}
@@ -502,14 +554,14 @@ func (c *nadController) getActiveNetworkForNamespace(namespace string) (util.Net
 			// map, but it doesn't exist in the nads map
 			panic("NAD Controller broken consistency between primary NADs and cached NADs")
 		}
-		network = c.networkController.getNetwork(netName)
+		network = c.networkController.GetNetworkFromInformer(netName)
 	}
 
 	return network, primaryNAD
 }
 
 func (c *nadController) GetNetwork(name string) util.NetInfo {
-	network := c.networkController.getNetwork(name)
+	network := c.networkController.GetNetworkFromInformer(name)
 	if network == nil && name == types.DefaultNetworkName {
 		return &util.DefaultNetInfo{}
 	}
@@ -554,7 +606,7 @@ func (c *nadController) DoWithLock(f func(network util.NetInfo) error) error {
 			// map, but it doesn't exist in the nads map
 			panic("NAD Controller broken consistency between primary NADs and cached NADs")
 		}
-		network := c.networkController.getNetwork(netName)
+		network := c.networkController.GetNetworkFromInformer(netName)
 		n := util.NewMutableNetInfo(network)
 		// update the returned netInfo copy to only have the primary NAD for this namespace
 		n.SetNADs(primaryNAD)
@@ -628,8 +680,8 @@ func (c *nadController) handleNetworkID(old util.NetInfo, new util.MutableNetInf
 
 		// check if there is still a network running with that ID in the process
 		// of being stopped
-		other := c.networkController.getRunningNetwork(id)
-		if other != "" && c.networkController.getNetwork(other) == nil {
+		other := c.networkController.GetRunningNetwork(id)
+		if other != "" && c.networkController.GetNetworkFromInformer(other) == nil {
 			c.networkIDAllocator.ReleaseID(name)
 			return fmt.Errorf("found other network %s being stopped with allocated ID %d, will retry", other, id)
 		}
@@ -673,9 +725,5 @@ func (c *nadController) handleNetworkID(old util.NetInfo, new util.MutableNetInf
 func (c *nadController) GetActiveNetwork(network string) util.NetInfo {
 	c.RLock()
 	defer c.RUnlock()
-	state := c.networkController.getNetworkState(network)
-	if state == nil {
-		return nil
-	}
-	return state.controller
+	return c.networkController.GetNetworkFromCurrentState(network)
 }

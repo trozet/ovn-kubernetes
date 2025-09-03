@@ -61,7 +61,10 @@ var _ = Describe("User Defined Network Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f.Start()).To(Succeed())
 
-		networkManager, err := networkmanager.NewForCluster(&nmtest.FakeControllerManager{}, f, cs, nil)
+		ncFunc := func(_, _, _ string, _ networkmanager.ControllerManager, _ *factory.WatchFactory) networkmanager.UDNController {
+			return nil
+		}
+		networkManager, err := networkmanager.NewForCluster(&nmtest.FakeControllerManager{}, f, ncFunc, cs, nil)
 		Expect(err).NotTo(HaveOccurred())
 		return New(cs.NetworkAttchDefClient, f.NADInformer(),
 			cs.UserDefinedNetworkClient, f.UserDefinedNetworkInformer(), f.ClusterUserDefinedNetworkInformer(),

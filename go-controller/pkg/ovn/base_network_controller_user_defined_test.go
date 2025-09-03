@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
 	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
@@ -225,7 +226,10 @@ var _ = Describe("BaseUserDefinedNetworkController", func() {
 		controller, ok := fakeOVN.userDefinedNetworkControllers["bluenet"]
 		Expect(ok).To(BeTrue())
 		// inject a real networkManager instead of a fake one, so getActiveNetworkForNamespace will get called
-		nadController, err := networkmanager.NewForZone("dummyZone", nil, fakeOVN.watcher)
+		ncFunc := func(_, _, _ string, _ networkmanager.ControllerManager, _ *factory.WatchFactory) networkmanager.UDNController {
+			return nil
+		}
+		nadController, err := networkmanager.NewForZone("dummyZone", nil, fakeOVN.watcher, ncFunc)
 		Expect(err).NotTo(HaveOccurred())
 		controller.bnc.networkManager = nadController.Interface()
 

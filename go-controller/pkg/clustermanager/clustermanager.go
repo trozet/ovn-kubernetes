@@ -20,6 +20,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/unidling"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/healthcheck"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
@@ -85,7 +86,7 @@ func NewClusterManager(
 
 	cm.networkManager = networkmanager.Default()
 	if config.OVNKubernetesFeature.EnableMultiNetwork {
-		cm.networkManager, err = networkmanager.NewForCluster(cm, wf, ovnClient, recorder)
+		cm.networkManager, err = networkmanager.NewForCluster(cm, wf, ovn.NewNetworkController, ovnClient, recorder)
 		if err != nil {
 			return nil, err
 		}
@@ -255,6 +256,7 @@ func (cm *ClusterManager) Stop() {
 		cm.raController.Stop()
 		cm.raController = nil
 	}
+	cm.networkManager.Stop()
 }
 
 func (cm *ClusterManager) NewNetworkController(netInfo util.NetInfo) (networkmanager.NetworkController, error) {
