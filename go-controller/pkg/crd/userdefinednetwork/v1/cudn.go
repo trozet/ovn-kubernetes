@@ -36,6 +36,11 @@ type ClusterUserDefinedNetworkSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf", message="Network spec is immutable"
 	// +required
 	Network NetworkSpec `json:"network"`
+
+	// nodeSelector limits the network to selected nodes. This field
+	// follows standard label selector semantics.
+	// +optional
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
 }
 
 // NetworkSpec defines the desired state of UserDefinedNetworkSpec.

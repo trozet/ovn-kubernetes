@@ -45,6 +45,11 @@ type UserDefinedNetworkSpec struct {
 	// Layer2 is the Layer2 topology configuration.
 	// +optional
 	Layer2 *Layer2Config `json:"layer2,omitempty"`
+
+	// nodeSelector limits the network to selected nodes. This field
+	// follows standard label selector semantics.
+	// +optional
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
 }
 
 // UserDefinedNetworkStatus contains the observed status of the UserDefinedNetwork.

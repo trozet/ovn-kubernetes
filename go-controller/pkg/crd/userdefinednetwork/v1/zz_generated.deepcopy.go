@@ -107,6 +107,11 @@ func (in *ClusterUserDefinedNetworkSpec) DeepCopyInto(out *ClusterUserDefinedNet
 	*out = *in
 	in.NamespaceSelector.DeepCopyInto(&out.NamespaceSelector)
 	in.Network.DeepCopyInto(&out.Network)
+	if in.NodeSelector != nil {
+		in, out := &in.NodeSelector, &out.NodeSelector
+		*out = new(metav1.LabelSelector)
+		(*in).DeepCopyInto(*out)
+	}
 	return
 }
 
@@ -426,6 +431,11 @@ func (in *UserDefinedNetworkSpec) DeepCopyInto(out *UserDefinedNetworkSpec) {
 	if in.Layer2 != nil {
 		in, out := &in.Layer2, &out.Layer2
 		*out = new(Layer2Config)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.NodeSelector != nil {
+		in, out := &in.NodeSelector, &out.NodeSelector
+		*out = new(metav1.LabelSelector)
 		(*in).DeepCopyInto(*out)
 	}
 	return

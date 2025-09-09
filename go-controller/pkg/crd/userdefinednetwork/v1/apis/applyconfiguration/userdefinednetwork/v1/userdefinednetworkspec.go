@@ -19,14 +19,16 @@ package v1
 
 import (
 	userdefinednetworkv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
+	metav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 )
 
 // UserDefinedNetworkSpecApplyConfiguration represents a declarative configuration of the UserDefinedNetworkSpec type for use
 // with apply.
 type UserDefinedNetworkSpecApplyConfiguration struct {
-	Topology *userdefinednetworkv1.NetworkTopology `json:"topology,omitempty"`
-	Layer3   *Layer3ConfigApplyConfiguration       `json:"layer3,omitempty"`
-	Layer2   *Layer2ConfigApplyConfiguration       `json:"layer2,omitempty"`
+	Topology     *userdefinednetworkv1.NetworkTopology   `json:"topology,omitempty"`
+	Layer3       *Layer3ConfigApplyConfiguration         `json:"layer3,omitempty"`
+	Layer2       *Layer2ConfigApplyConfiguration         `json:"layer2,omitempty"`
+	NodeSelector *metav1.LabelSelectorApplyConfiguration `json:"nodeSelector,omitempty"`
 }
 
 // UserDefinedNetworkSpecApplyConfiguration constructs a declarative configuration of the UserDefinedNetworkSpec type for use with
@@ -56,5 +58,13 @@ func (b *UserDefinedNetworkSpecApplyConfiguration) WithLayer3(value *Layer3Confi
 // If called multiple times, the Layer2 field is set to the value of the last call.
 func (b *UserDefinedNetworkSpecApplyConfiguration) WithLayer2(value *Layer2ConfigApplyConfiguration) *UserDefinedNetworkSpecApplyConfiguration {
 	b.Layer2 = value
+	return b
+}
+
+// WithNodeSelector sets the NodeSelector field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the NodeSelector field is set to the value of the last call.
+func (b *UserDefinedNetworkSpecApplyConfiguration) WithNodeSelector(value *metav1.LabelSelectorApplyConfiguration) *UserDefinedNetworkSpecApplyConfiguration {
+	b.NodeSelector = value
 	return b
 }

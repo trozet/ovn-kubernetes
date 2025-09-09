@@ -26,6 +26,7 @@ import (
 type ClusterUserDefinedNetworkSpecApplyConfiguration struct {
 	NamespaceSelector *metav1.LabelSelectorApplyConfiguration `json:"namespaceSelector,omitempty"`
 	Network           *NetworkSpecApplyConfiguration          `json:"network,omitempty"`
+	NodeSelector      *metav1.LabelSelectorApplyConfiguration `json:"nodeSelector,omitempty"`
 }
 
 // ClusterUserDefinedNetworkSpecApplyConfiguration constructs a declarative configuration of the ClusterUserDefinedNetworkSpec type for use with
@@ -47,5 +48,13 @@ func (b *ClusterUserDefinedNetworkSpecApplyConfiguration) WithNamespaceSelector(
 // If called multiple times, the Network field is set to the value of the last call.
 func (b *ClusterUserDefinedNetworkSpecApplyConfiguration) WithNetwork(value *NetworkSpecApplyConfiguration) *ClusterUserDefinedNetworkSpecApplyConfiguration {
 	b.Network = value
+	return b
+}
+
+// WithNodeSelector sets the NodeSelector field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the NodeSelector field is set to the value of the last call.
+func (b *ClusterUserDefinedNetworkSpecApplyConfiguration) WithNodeSelector(value *metav1.LabelSelectorApplyConfiguration) *ClusterUserDefinedNetworkSpecApplyConfiguration {
+	b.NodeSelector = value
 	return b
 }
