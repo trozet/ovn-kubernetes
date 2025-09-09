@@ -55,6 +55,8 @@ type nadController struct {
 	sync.RWMutex
 
 	name            string
+	zone            string
+	node            string
 	nadLister       nadlisters.NetworkAttachmentDefinitionLister
 	udnLister       userdefinednetworklister.UserDefinedNetworkLister
 	cudnLister      userdefinednetworklister.ClusterUserDefinedNetworkLister
@@ -88,6 +90,8 @@ func newController(
 ) (*nadController, error) {
 	c := &nadController{
 		name:              fmt.Sprintf("[%s NAD controller]", name),
+		zone:              zone,
+		node:              node,
 		recorder:          recorder,
 		nadLister:         wf.NADInformer().Lister(),
 		nodeLister:        wf.NodeCoreInformer().Lister(),
@@ -287,6 +291,16 @@ func (c *nadController) syncNAD(key string, nad *nettypes.NetworkAttachmentDefin
 			return nil
 		}
 		nadNetworkName = nadNetwork.GetNetworkName()
+
+		// We don't want to create/update NADs that map to UDNs not on our node
+		shouldFilter, err := c.filterUDN(nad)
+		if err != nil {
+			return fmt.Errorf("%s: failed filtering NAD %s: %w", c.name, key, err)
+		}
+		if shouldFilter {
+			klog.V(5).Infof("Ignoring NAD %q as it maps to a CUDN/UDN that is not managed by our node", key)
+			return nil
+		}
 	}
 
 	c.Lock()
@@ -678,4 +692,61 @@ func (c *nadController) GetActiveNetwork(network string) util.NetInfo {
 		return nil
 	}
 	return state.controller
+}
+
+// FilterUDN decides if a NAD maps to a CUDN/UDN and if it does not apply to this node
+func (c *nadController) filterUDN(nad *nettypes.NetworkAttachmentDefinition) (bool, error) {
+	ownerRef := metav1.GetControllerOf(nad)
+	if ownerRef == nil {
+		return false, nil
+	}
+
+	// if this isn't a node controller or zone controller in IC, don't filter
+	if len(c.node) == 0 && (c.zone == types.OvnDefaultZone || len(c.zone) == 0) {
+		return false, nil
+	}
+
+	ourNode := c.node
+	if len(c.zone) > 0 {
+		ourNode = c.zone
+	}
+
+	switch ownerRef.Kind {
+	case "ClusterUserDefinedNetwork":
+		cudn, err := c.cudnLister.Get(ownerRef.Name)
+		if err != nil {
+			return false, fmt.Errorf("failed to get ClusterUserDefinedNetwork %q from cache: %v", ownerRef.Name, err)
+		}
+		if cudn.Spec.NodeSelector != nil {
+			node, err := c.nodeLister.Get(ourNode)
+			if err != nil {
+				return false, fmt.Errorf("failed to get node %q from cache: %w", ourNode, err)
+			}
+			sel, err := metav1.LabelSelectorAsSelector(cudn.Spec.NodeSelector)
+			if err != nil {
+				return false, err
+			}
+			return !sel.Matches(labels.Set(node.Labels)), nil
+		}
+		return false, nil
+	case "UserDefinedNetwork":
+		udn, err := c.udnLister.UserDefinedNetworks(nad.Namespace).Get(ownerRef.Name)
+		if err != nil {
+			return false, fmt.Errorf("failed to get UserDefinedNetwork %q from cache: %v", ownerRef.Name, err)
+		}
+		if udn.Spec.NodeSelector != nil {
+			node, err := c.nodeLister.Get(ourNode)
+			if err != nil {
+				return false, fmt.Errorf("failed to get node %q from cache: %w", ourNode, err)
+			}
+			sel, err := metav1.LabelSelectorAsSelector(udn.Spec.NodeSelector)
+			if err != nil {
+				return false, err
+			}
+			return !sel.Matches(labels.Set(node.Labels)), nil
+		}
+		return false, nil
+	default:
+		return false, fmt.Errorf("unknown owner kind %q", ownerRef.Kind)
+	}
 }

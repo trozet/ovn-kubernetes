@@ -24,6 +24,8 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
 	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
+	userdefinednetworkv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
+	userdefinednetworklister "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/listers/userdefinednetwork/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
@@ -132,6 +134,78 @@ func (f *fakeNamespaceLister) Get(name string) (*corev1.Namespace, error) {
 	}, nil
 }
 
+const (
+	nodeName        = "ovn-worker"
+	noMatchUDNName  = "testUDN1"
+	matchingUDNName = "testUDN2"
+)
+
+type fakeNodeLister struct{}
+
+func (f *fakeNodeLister) List(labels.Selector) (ret []*corev1.Node, err error) {
+	return []*corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node",
+			},
+		},
+	}, nil
+}
+
+// Get retrieves the Namespace from the index for a given name.
+// Objects returned here must be treated as read-only.
+func (f *fakeNodeLister) Get(name string) (*corev1.Node, error) {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{"kubernetes.io/hostname": name},
+		},
+	}, nil
+}
+
+type fakeUDNLister struct{}
+
+func (f *fakeUDNLister) UserDefinedNetworks(_ string) userdefinednetworklister.UserDefinedNetworkNamespaceLister {
+	return &fakeUDNLister{}
+}
+
+func (f *fakeUDNLister) List(labels.Selector) (ret []*userdefinednetworkv1.UserDefinedNetwork, err error) {
+	return nil, nil
+}
+
+var udnNoMatchSelector = metav1.LabelSelector{MatchLabels: map[string]string{"never": "match"}}
+var udnWithNoMatchingNode = userdefinednetworkv1.UserDefinedNetwork{
+	ObjectMeta: metav1.ObjectMeta{
+		Name:   noMatchUDNName,
+		Labels: map[string]string{types.RequiredUDNNamespaceLabel: ""},
+	},
+	Spec: userdefinednetworkv1.UserDefinedNetworkSpec{
+		NodeSelector: &udnNoMatchSelector,
+	},
+}
+
+var udnMatchSelector = metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/hostname": "ovn-worker"}}
+var udnWithMatchingNode = userdefinednetworkv1.UserDefinedNetwork{
+	ObjectMeta: metav1.ObjectMeta{
+		Name:   matchingUDNName,
+		Labels: map[string]string{types.RequiredUDNNamespaceLabel: ""},
+	},
+	Spec: userdefinednetworkv1.UserDefinedNetworkSpec{
+		NodeSelector: &udnMatchSelector,
+	},
+}
+
+// Get retrieves the UDN from the index for a given name.
+// Objects returned here must be treated as read-only.
+func (f *fakeUDNLister) Get(name string) (*userdefinednetworkv1.UserDefinedNetwork, error) {
+	if name == noMatchUDNName {
+		return &udnWithNoMatchingNode, nil
+	} else if name == matchingUDNName {
+		return &udnWithMatchingNode, nil
+	}
+	return nil, fmt.Errorf("not found")
+}
+
 func TestNADController(t *testing.T) {
 	networkAPrimary := &ovncnitypes.NetConf{
 		Topology: types.Layer2Topology,
@@ -192,6 +266,9 @@ func TestNADController(t *testing.T) {
 		name     string
 		args     []args
 		expected []expected
+		node     string
+		zone     string
+		udn      *userdefinednetworkv1.UserDefinedNetwork
 	}{
 		{
 			name: "NAD on default network is tracked with default controller",
@@ -222,6 +299,64 @@ func TestNADController(t *testing.T) {
 					nads:    []string{"test/nad_1"},
 				},
 			},
+		},
+		{
+			name: "NAD added matching UDN not on node is ignored - node controller",
+			args: []args{
+				{
+					nad:     "test/nad_1",
+					network: networkAPrimary,
+				},
+			},
+			expected: []expected{},
+			node:     nodeName,
+			udn:      &udnWithNoMatchingNode,
+		},
+		{
+			name: "NAD added matching UDN on node is not ignored - node controller",
+			args: []args{
+				{
+					nad:     "test/nad_1",
+					network: networkAPrimary,
+				},
+			},
+			expected: []expected{
+				{
+					network: networkAPrimary,
+					nads:    []string{"test/nad_1"},
+				},
+			},
+			node: nodeName,
+			udn:  &udnWithMatchingNode,
+		},
+		{
+			name: "NAD added matching UDN not on node is ignored - zone controller",
+			args: []args{
+				{
+					nad:     "test/nad_1",
+					network: networkAPrimary,
+				},
+			},
+			expected: []expected{},
+			zone:     nodeName,
+			udn:      &udnWithNoMatchingNode,
+		},
+		{
+			name: "NAD added matching UDN on node is not ignored - zone controller",
+			args: []args{
+				{
+					nad:     "test/nad_1",
+					network: networkAPrimary,
+				},
+			},
+			expected: []expected{
+				{
+					network: networkAPrimary,
+					nads:    []string{"test/nad_1"},
+				},
+			},
+			zone: nodeName,
+			udn:  &udnWithMatchingNode,
 		},
 		{
 			name: "NAD added then deleted",
@@ -492,6 +627,9 @@ func TestNADController(t *testing.T) {
 			g.Expect(err).ToNot(gomega.HaveOccurred())
 			config.OVNKubernetesFeature.EnableNetworkSegmentation = true
 			config.OVNKubernetesFeature.EnableMultiNetwork = true
+			if len(tt.zone) > 0 {
+				config.Default.Zone = tt.zone
+			}
 			tcm := &testControllerManager{
 				controllers: map[string]NetworkController{},
 				defaultNetwork: &testNetworkController{
@@ -506,6 +644,10 @@ func TestNADController(t *testing.T) {
 				networkIDAllocator: id.NewIDAllocator("NetworkIDs", MaxNetworks),
 				nadClient:          fakeClient.NetworkAttchDefClient,
 				namespaceLister:    &fakeNamespaceLister{},
+				nodeLister:         &fakeNodeLister{},
+				udnLister:          &fakeUDNLister{},
+				node:               tt.node,
+				zone:               tt.zone,
 			}
 			err = nadController.networkIDAllocator.ReserveID(types.DefaultNetworkName, types.DefaultNetworkID)
 			g.Expect(err).ToNot(gomega.HaveOccurred())
@@ -521,7 +663,7 @@ func TestNADController(t *testing.T) {
 				var nad *nettypes.NetworkAttachmentDefinition
 				if args.network != nil {
 					args.network.NADName = args.nad
-					nad, err = buildNAD(name, namespace, args.network)
+					nad, err = buildNAD(name, namespace, args.network, tt.udn)
 					g.Expect(err).ToNot(gomega.HaveOccurred())
 					_, err = fakeClient.NetworkAttchDefClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions(namespace).Create(context.Background(), nad, metav1.CreateOptions{})
 					g.Expect(err).To(gomega.Or(gomega.Not(gomega.HaveOccurred()), gomega.MatchError(apierrors.IsAlreadyExists, "AlreadyExists")))
@@ -778,11 +920,12 @@ func TestSyncAll(t *testing.T) {
 	}
 }
 
-func buildNAD(name, namespace string, network *ovncnitypes.NetConf) (*nettypes.NetworkAttachmentDefinition, error) {
+func buildNAD(name, namespace string, network *ovncnitypes.NetConf, udn *userdefinednetworkv1.UserDefinedNetwork) (*nettypes.NetworkAttachmentDefinition, error) {
 	config, err := json.Marshal(network)
 	if err != nil {
 		return nil, err
 	}
+
 	nad := &nettypes.NetworkAttachmentDefinition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -792,11 +935,16 @@ func buildNAD(name, namespace string, network *ovncnitypes.NetConf) (*nettypes.N
 			Config: string(config),
 		},
 	}
+	if udn != nil {
+		ownerRef := *metav1.NewControllerRef(udn, userdefinednetworkv1.SchemeGroupVersion.WithKind("UserDefinedNetwork"))
+		nad.ObjectMeta.OwnerReferences = []metav1.OwnerReference{ownerRef}
+	}
+
 	return nad, nil
 }
 
 func buildNADWithAnnotations(name, namespace string, network *ovncnitypes.NetConf, annotations map[string]string) (*nettypes.NetworkAttachmentDefinition, error) {
-	nad, err := buildNAD(name, namespace, network)
+	nad, err := buildNAD(name, namespace, network, nil)
 	if err != nil {
 		return nil, err
 	}
