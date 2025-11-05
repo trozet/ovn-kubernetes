@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	nettypes "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
@@ -621,6 +622,7 @@ func TestNADController(t *testing.T) {
 }
 
 func TestSyncAll(t *testing.T) {
+	const nodeNetworkID = 1337
 	network_A := &ovncnitypes.NetConf{
 		Topology: types.Layer3Topology,
 		NetConf: cnitypes.NetConf{
@@ -645,9 +647,13 @@ func TestSyncAll(t *testing.T) {
 		networkID string
 	}
 	tests := []struct {
-		name         string
-		testNADs     []TestNAD
-		syncAllError error
+		name                 string
+		testNADs             []TestNAD
+		syncAllInjectedError error
+		syncAllExpectedError bool
+		node                 *corev1.Node
+		zoneMode             bool
+		updateNetworkID      bool
 	}{
 		{
 			name: "multiple networks referenced by multiple nads",
@@ -665,7 +671,7 @@ func TestSyncAll(t *testing.T) {
 					netconf: &network_A_Copy,
 				},
 			},
-			syncAllError: ErrNetworkControllerTopologyNotManaged,
+			syncAllInjectedError: ErrNetworkControllerTopologyNotManaged,
 		},
 		{
 			name: "nad already annotated with network ID",
@@ -676,6 +682,81 @@ func TestSyncAll(t *testing.T) {
 					networkID: "1",
 				},
 			},
+		},
+		{
+			name: "nad and node with no network ID should fail to sync in zone mode",
+			testNADs: []TestNAD{
+				{
+					name:    "test/nad1",
+					netconf: network_A,
+				},
+			},
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-node",
+					Annotations: map[string]string{
+						// no "OVNNodeNetworkIds" annotation or it's empty
+					},
+				},
+			},
+			zoneMode:             true,
+			syncAllExpectedError: true,
+		},
+		{
+			name: "nad without network ID + node with network ID should fail to sync in zone mode",
+			testNADs: []TestNAD{
+				{
+					name:    "test/nad1",
+					netconf: network_A,
+				},
+			},
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node",
+					Annotations: map[string]string{
+						util.OvnNetworkIDs: fmt.Sprintf(`{"test/nad1": "%d"}`, nodeNetworkID),
+					},
+				},
+			},
+			zoneMode:             true,
+			syncAllExpectedError: true,
+		},
+		{
+			name: "nad without network ID + node with network ID should not fail to sync in cluster manager mode",
+			testNADs: []TestNAD{
+				{
+					name:    "test/nad1",
+					netconf: network_A,
+				},
+			},
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node",
+					Annotations: map[string]string{
+						util.OvnNetworkIDs: fmt.Sprintf(`{"network_A": "%d"}`, nodeNetworkID),
+					},
+				},
+			},
+		},
+		{
+			name: "nad without network ID + node with network ID should to sync in zone mode when NAD is updated",
+			testNADs: []TestNAD{
+				{
+					name:    "test/nad1",
+					netconf: network_A,
+				},
+			},
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node",
+					Annotations: map[string]string{
+						util.OvnNetworkIDs: fmt.Sprintf(`{"test/nad1": "%d"}`, nodeNetworkID),
+					},
+				},
+			},
+			zoneMode:             true,
+			syncAllExpectedError: false,
+			updateNetworkID:      true,
 		},
 	}
 	for _, tt := range tests {
@@ -693,18 +774,28 @@ func TestSyncAll(t *testing.T) {
 			tcm := &testControllerManager{
 				controllers: map[string]NetworkController{},
 			}
-			if tt.syncAllError != nil {
-				tcm.raiseErrorWhenCreatingController = tt.syncAllError
+			if tt.syncAllInjectedError != nil {
+				tcm.raiseErrorWhenCreatingController = tt.syncAllInjectedError
 			}
 
-			controller, err := NewForCluster(
-				tcm,
-				wf,
-				fakeClient,
-				nil,
-				id.NewTunnelKeyAllocator("TunnelKeys"),
-			)
+			var controller Controller
+			if tt.zoneMode {
+				controller, err = NewForZone("test", tcm, wf)
+			} else {
+				controller, err = NewForCluster(
+					tcm,
+					wf,
+					fakeClient,
+					nil,
+					id.NewTunnelKeyAllocator("TunnelKeys"),
+				)
+			}
 			g.Expect(err).ToNot(gomega.HaveOccurred())
+			nc, ok := controller.(*nadController)
+			if !ok {
+				t.Fatalf("expected *nadController, got %T", controller)
+			}
+			nc.waitForNADTimeout = 2 * time.Second
 
 			expectedNetworks := map[string]util.NetInfo{}
 			expectedPrimaryNetworks := map[string]util.NetInfo{}
@@ -725,7 +816,9 @@ func TestSyncAll(t *testing.T) {
 				testNAD.netconf.NADName = testNAD.name
 				nadAnnotations := map[string]string{
 					types.OvnNetworkNameAnnotation: testNAD.netconf.Name,
-					types.OvnNetworkIDAnnotation:   testNAD.networkID,
+				}
+				if len(testNAD.networkID) > 0 {
+					nadAnnotations[types.OvnNetworkIDAnnotation] = testNAD.networkID
 				}
 				nad, err := buildNADWithAnnotations(name, namespace, testNAD.netconf, nadAnnotations)
 				g.Expect(err).ToNot(gomega.HaveOccurred())
@@ -736,13 +829,16 @@ func TestSyncAll(t *testing.T) {
 				)
 				g.Expect(err).ToNot(gomega.HaveOccurred())
 				netInfo := expectedNetworks[testNAD.netconf.Name]
-				if netInfo == nil {
+				if netInfo == nil && !tt.syncAllExpectedError {
 					netInfo, err = util.NewNetInfo(testNAD.netconf)
 					mutableNetInfo := util.NewMutableNetInfo(netInfo)
 					if testNAD.networkID != "" {
 						id, err := strconv.Atoi(testNAD.networkID)
 						g.Expect(err).ToNot(gomega.HaveOccurred())
 						mutableNetInfo.SetNetworkID(id)
+						netInfo = mutableNetInfo
+					} else if tt.node != nil && !tt.zoneMode {
+						mutableNetInfo.SetNetworkID(nodeNetworkID)
 						netInfo = mutableNetInfo
 					}
 					g.Expect(err).ToNot(gomega.HaveOccurred())
@@ -753,12 +849,38 @@ func TestSyncAll(t *testing.T) {
 				}
 			}
 
+			if tt.node != nil {
+				_, err := fakeClient.KubeClient.CoreV1().Nodes().Create(context.Background(), tt.node, metav1.CreateOptions{})
+				g.Expect(err).ToNot(gomega.HaveOccurred())
+			}
+
 			err = wf.Start()
 			g.Expect(err).ToNot(gomega.HaveOccurred())
 			defer wf.Shutdown()
 
+			// used in the case where NAD does not have network ID, but node does and we want to make sure zone controller
+			// syncs correctly
+			if tt.updateNetworkID {
+				go func() {
+					// give syncAll a head start to enter the wait loop
+					time.Sleep(50 * time.Millisecond)
+
+					// update the NAD with network ID annotation
+					nad, _ := fakeClient.NetworkAttchDefClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions("test").Get(context.Background(), "nad1", metav1.GetOptions{})
+					if nad.Annotations == nil {
+						nad.Annotations = map[string]string{}
+					}
+					nad.Annotations[types.OvnNetworkIDAnnotation] = "1337"
+					_, _ = fakeClient.NetworkAttchDefClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions("test").Update(context.Background(), nad, metav1.UpdateOptions{})
+				}()
+			}
+
 			err = controller.Start()
-			g.Expect(err).ToNot(gomega.HaveOccurred())
+			if tt.syncAllExpectedError {
+				g.Expect(err).To(gomega.HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(gomega.HaveOccurred())
+			}
 			// sync has already happened, stop
 			controller.Stop()
 
@@ -775,12 +897,13 @@ func TestSyncAll(t *testing.T) {
 					g.Expect(actualNetworks[name].GetNetworkID()).To(gomega.Equal(network.GetNetworkID()))
 				}
 			}
-
-			actualPrimaryNetwork, err := controller.Interface().GetActiveNetworkForNamespace("test")
-			g.Expect(err).ToNot(gomega.HaveOccurred())
-			g.Expect(expectedPrimaryNetworks).To(gomega.HaveKey(actualPrimaryNetwork.GetNetworkName()))
-			expectedPrimaryNetwork := expectedPrimaryNetworks[actualPrimaryNetwork.GetNetworkName()]
-			g.Expect(util.AreNetworksCompatible(expectedPrimaryNetwork, actualPrimaryNetwork)).To(gomega.BeTrue())
+			if !tt.syncAllExpectedError {
+				actualPrimaryNetwork, err := controller.Interface().GetActiveNetworkForNamespace("test")
+				g.Expect(err).ToNot(gomega.HaveOccurred())
+				g.Expect(expectedPrimaryNetworks).To(gomega.HaveKey(actualPrimaryNetwork.GetNetworkName()))
+				expectedPrimaryNetwork := expectedPrimaryNetworks[actualPrimaryNetwork.GetNetworkName()]
+				g.Expect(util.AreNetworksCompatible(expectedPrimaryNetwork, actualPrimaryNetwork)).To(gomega.BeTrue())
+			}
 		})
 	}
 }
