@@ -18,6 +18,7 @@ type Allocator interface {
 	ReserveID(name string, id int) error
 	ReleaseID(name string)
 	ForName(name string) NamedAllocator
+	GetID(name string) int
 }
 
 // NamedAllocator of IDs for a specific resource
@@ -98,6 +99,16 @@ func (idAllocator *idAllocator) ReleaseID(name string) {
 		idAllocator.idBitmap.Release(v)
 		idAllocator.nameIdMap.Delete(name)
 	}
+}
+
+func (idAllocator *idAllocator) GetID(name string) int {
+	idAllocator.nameIdMap.LockKey(name)
+	defer idAllocator.nameIdMap.UnlockKey(name)
+	v, ok := idAllocator.nameIdMap.Load(name)
+	if ok {
+		return v
+	}
+	return invalidID
 }
 
 func (idAllocator *idAllocator) ForName(name string) NamedAllocator {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 
+	nadclientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
+
 	"k8s.io/client-go/tools/record"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
@@ -71,7 +73,7 @@ func Default() Controller {
 func NewForCluster(
 	cm ControllerManager,
 	wf watchFactory,
-	ovnClient *util.OVNClusterManagerClientset,
+	nadClient nadclientset.Interface,
 	recorder record.EventRecorder,
 	tunnelKeysAllocator *id.TunnelKeysAllocator,
 ) (Controller, error) {
@@ -81,7 +83,7 @@ func NewForCluster(
 		"",
 		cm,
 		wf,
-		ovnClient,
+		nadClient,
 		recorder,
 		tunnelKeysAllocator,
 	)
@@ -92,6 +94,7 @@ func NewForZone(
 	zone string,
 	cm ControllerManager,
 	wf watchFactory,
+	nadClient nadclientset.Interface,
 ) (Controller, error) {
 	return new(
 		"zone-nad-controller",
@@ -99,7 +102,7 @@ func NewForZone(
 		"",
 		cm,
 		wf,
-		nil,
+		nadClient,
 		nil,
 		nil,
 	)
@@ -110,6 +113,7 @@ func NewForNode(
 	node string,
 	cm ControllerManager,
 	wf watchFactory,
+	nadClient nadclientset.Interface,
 ) (Controller, error) {
 	return new(
 		"node-nad-controller",
@@ -117,7 +121,7 @@ func NewForNode(
 		node,
 		cm,
 		wf,
-		nil,
+		nadClient,
 		nil,
 		nil,
 	)
@@ -132,11 +136,11 @@ func new(
 	node string,
 	cm ControllerManager,
 	wf watchFactory,
-	ovnClient *util.OVNClusterManagerClientset,
+	nadClient nadclientset.Interface,
 	recorder record.EventRecorder,
 	tunnelKeysAllocator *id.TunnelKeysAllocator,
 ) (Controller, error) {
-	return newController(name, zone, node, cm, wf, ovnClient, recorder, tunnelKeysAllocator)
+	return newController(name, zone, node, cm, wf, nadClient, recorder, tunnelKeysAllocator)
 }
 
 // ControllerManager manages controllers. Needs to be provided in order to build

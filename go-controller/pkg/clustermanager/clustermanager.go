@@ -99,7 +99,7 @@ func NewClusterManager(
 			return nil, fmt.Errorf("failed to initialize tunnel keys allocator: %w", err)
 		}
 
-		cm.networkManager, err = networkmanager.NewForCluster(cm, wf, ovnClient, recorder, tunnelKeysAllocator)
+		cm.networkManager, err = networkmanager.NewForCluster(cm, wf, ovnClient.NetworkAttchDefClient, recorder, tunnelKeysAllocator)
 		if err != nil {
 			return nil, err
 		}

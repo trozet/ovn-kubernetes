@@ -1005,7 +1005,7 @@ func TestController_reconcile(t *testing.T) {
 			wf, err := factory.NewClusterManagerWatchFactory(fakeClientset)
 			g.Expect(err).ToNot(gomega.HaveOccurred())
 
-			nm, err := networkmanager.NewForCluster(&networkmanager.FakeControllerManager{}, wf, fakeClientset, nil, id.NewTunnelKeyAllocator("TunnelKeys"))
+			nm, err := networkmanager.NewForCluster(&networkmanager.FakeControllerManager{}, wf, fakeClientset.NetworkAttchDefClient, nil, id.NewTunnelKeyAllocator("TunnelKeys"))
 			g.Expect(err).ToNot(gomega.HaveOccurred())
 
 			c := NewController(nm.Interface(), wf, fakeClientset)

@@ -898,12 +898,10 @@ func (c *Controller) updateNADs(ra string, nads []*nadtypes.NetworkAttachmentDef
 		}
 
 		err = k.SetAnnotationsOnNAD(
-			nad.Namespace,
-			nad.Name,
+			nad,
 			map[string]string{
 				types.OvnRouteAdvertisementsKey: string(nadRAjson),
 			},
-			fieldManager,
 		)
 		if err != nil {
 			return hadUpdates, fmt.Errorf("failed to annotate NAD %q: %w", nad.Name, err)

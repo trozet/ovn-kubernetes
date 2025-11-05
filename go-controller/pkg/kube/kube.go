@@ -3,9 +3,11 @@ package kube
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	ipamclaimsapi "github.com/k8snetworkplumbingwg/ipamclaims/pkg/crd/ipamclaims/v1alpha1"
 	ipamclaimssclientset "github.com/k8snetworkplumbingwg/ipamclaims/pkg/crd/ipamclaims/v1alpha1/apis/clientset/versioned"
+	nadtypes "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	nadclientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
 	ocpcloudnetworkapi "github.com/openshift/api/cloudnetwork/v1"
 	ocpcloudnetworkclientset "github.com/openshift/client-go/cloudnetwork/clientset/versioned"
@@ -18,6 +20,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	kv1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/pager"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	anpclientset "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned"
 
@@ -376,28 +379,38 @@ func (k *KubeOVN) UpdateIPAMClaimIPs(updatedIPAMClaim *ipamclaimsapi.IPAMClaim) 
 	return err
 }
 
-// SetAnnotationsOnNAD takes a NAD namespace and name and a map of key/value string pairs to set as annotations
-func (k *KubeOVN) SetAnnotationsOnNAD(namespace, name string, annotations map[string]string, fieldManager string) error {
-	var err error
-	var patchData []byte
-	patch := struct {
-		Metadata map[string]interface{} `json:"metadata"`
-	}{
-		Metadata: map[string]interface{}{
-			"annotations": annotations,
-		},
+// SetAnnotationsOnNAD safely sets or updates annotations on a NAD resource.
+// Uses Get + Update to avoid overwriting other controller's annotations.
+// Retries on resourceVersion conflicts.
+func (k *KubeOVN) SetAnnotationsOnNAD(nad *nadtypes.NetworkAttachmentDefinition, annotations map[string]string) error {
+	if nad == nil {
+		return fmt.Errorf("nil NAD provided to SetAnnotationsOnNAD")
 	}
 
-	patchData, err = json.Marshal(&patch)
-	if err != nil {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// 1. Get the latest NAD object from the API
+		latest, err := k.NADClient.K8sCniCncfIoV1().
+			NetworkAttachmentDefinitions(nad.Namespace).
+			Get(context.Background(), nad.Name, metav1.GetOptions{})
+		if err != nil {
+			return err // RetryOnConflict won't retry NotFound or non-conflict errors
+		}
+
+		// 2. Initialize annotation map if nil
+		if latest.Annotations == nil {
+			latest.Annotations = map[string]string{}
+		}
+
+		// 3. Merge new annotations (replace only specified keys)
+		for key, val := range annotations {
+			latest.Annotations[key] = val
+		}
+
+		// 4. Update object
+		_, err = k.NADClient.K8sCniCncfIoV1().
+			NetworkAttachmentDefinitions(latest.Namespace).
+			Update(context.Background(), latest, metav1.UpdateOptions{})
+
 		return err
-	}
-
-	patchOptions := metav1.PatchOptions{}
-	if fieldManager != "" {
-		patchOptions.FieldManager = fieldManager
-	}
-
-	_, err = k.NADClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions(namespace).Patch(context.Background(), name, types.MergePatchType, patchData, patchOptions)
-	return err
+	})
 }

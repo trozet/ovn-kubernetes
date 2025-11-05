@@ -269,7 +269,7 @@ func NewNodeControllerManager(ovnClient *util.OVNClientset, wf factory.NodeWatch
 	var err error
 	ncm.networkManager = networkmanager.Default()
 	if isNetworkManagerRequiredForNode() {
-		ncm.networkManager, err = networkmanager.NewForNode(name, ncm, wf)
+		ncm.networkManager, err = networkmanager.NewForNode(name, ncm, wf, ovnClient.NetworkAttchDefClient)
 		if err != nil {
 			return nil, err
 		}

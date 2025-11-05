@@ -61,7 +61,8 @@ var _ = Describe("User Defined Network Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f.Start()).To(Succeed())
 
-		networkManager, err := networkmanager.NewForCluster(&networkmanager.FakeControllerManager{}, f, cs, nil, id.NewTunnelKeyAllocator("TunnelKeys"))
+		networkManager, err := networkmanager.NewForCluster(&networkmanager.FakeControllerManager{}, f,
+			cs.NetworkAttchDefClient, nil, id.NewTunnelKeyAllocator("TunnelKeys"))
 		Expect(err).NotTo(HaveOccurred())
 		return New(cs.NetworkAttchDefClient, f.NADInformer(),
 			cs.UserDefinedNetworkClient, f.UserDefinedNetworkInformer(), f.ClusterUserDefinedNetworkInformer(),
