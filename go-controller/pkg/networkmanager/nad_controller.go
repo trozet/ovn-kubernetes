@@ -3,6 +3,7 @@ package networkmanager
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -220,7 +221,7 @@ func (c *nadController) syncAll() (err error) {
 	nadsWithoutID := []*nettypes.NetworkAttachmentDefinition{}
 	for _, nad := range existingNADs {
 		// skip NADs that are not annotated with an ID
-		if c.networkIDAllocator != nil && nad.Annotations[types.OvnNetworkIDAnnotation] == "" {
+		if nad.Annotations[types.OvnNetworkIDAnnotation] == "" {
 			nadsWithoutID = append(nadsWithoutID, nad)
 			continue
 		}
@@ -234,28 +235,37 @@ func (c *nadController) syncAll() (err error) {
 		return nil
 	}
 
-	// If we are missing IDs, get them from the nodes which is where we
-	// originally had them
-	klog.V(5).Infof("%s: %d NADs are missing the network ID annotation, fetching from nodes", c.name, len(nadsWithoutID))
-	nodes, err := c.nodeLister.List(labels.Everything())
-	if err != nil {
-		return fmt.Errorf("error listing nodes: %w", err)
-	}
-	for _, n := range nodes {
-		networkIdsMap, err := util.GetNodeNetworkIDsAnnotationNetworkIDs(n)
-		if err == nil {
-			for networkName, id := range networkIdsMap {
+	// cluster manager - preallocate all node IDs to avoid new NADs taking them post start up
+	if c.networkIDAllocator != nil {
+		// If we are missing IDs, get them from the nodes which is where we
+		// originally had them
+		klog.Infof("%s: %d NADs are missing the network ID annotation, fetching from nodes", c.name, len(nadsWithoutID))
+		for _, nad := range nadsWithoutID {
+			nadNetwork, err := util.ParseNADInfo(nad)
+			if err != nil {
+				// in case the type for the NAD is not ovn-k we should not record the error event
+				if err.Error() != util.ErrorAttachDefNotOvnManaged.Error() {
+					klog.Errorf("%s: failed parsing NAD %s/%s: %v", c.name, nad.Namespace, nad.Name, err)
+				}
+				continue
+			}
+			netID, err := c.getNetworkIDFromNode(nadNetwork)
+			if err != nil {
+				return fmt.Errorf("%s: failed to fetch network ID from nodes for nad %s/%s: %v",
+					c.name, nad.Namespace, nad.Name, err)
+			}
+			if netID != types.InvalidID {
 				// Reserve the id for the network name. We can safely
 				// ignore any errors if there are duplicate ids or if
 				// two networks have the same id. We will assign network
 				// IDs anyway on sync.
-				_ = c.networkIDAllocator.ReserveID(networkName, id)
+				_ = c.networkIDAllocator.ReserveID(nadNetwork.GetNetworkName(), netID)
 			}
 		}
 	}
 
 	// finally process the pending NADs
-	for _, nad := range existingNADs {
+	for _, nad := range nadsWithoutID {
 		err := syncNAD(nad)
 		if err != nil {
 			return err
@@ -608,12 +618,21 @@ func (c *nadController) handleNetworkAnnotations(old util.NetInfo, new util.Muta
 	}
 
 	id := types.InvalidID
-	// check what ID is currently annotated
-	if nad != nil && nad.Annotations[types.OvnNetworkIDAnnotation] != "" {
-		annotated := nad.Annotations[types.OvnNetworkIDAnnotation]
-		id, err = strconv.Atoi(annotated)
-		if err != nil {
-			return fmt.Errorf("failed to parse annotated network ID: %w", err)
+	if nad != nil {
+		// check what ID is currently annotated
+		if nad.Annotations[types.OvnNetworkIDAnnotation] != "" {
+			annotated := nad.Annotations[types.OvnNetworkIDAnnotation]
+			id, err = strconv.Atoi(annotated)
+			if err != nil {
+				return fmt.Errorf("failed to parse annotated network ID: %w", err)
+			}
+		} else if new != nil {
+			// check if the node has a legacy ID
+			id, err = c.getNetworkIDFromNode(new)
+			if err != nil {
+				return fmt.Errorf("failed to get network ID from nodes for nad %s/%s: %w",
+					nad.Namespace, nad.Name, err)
+			}
 		}
 	}
 
@@ -747,6 +766,30 @@ func (c *nadController) handleNetworkAnnotations(old util.NetInfo, new util.Muta
 	new.SetTunnelKeys(tunnelKeys)
 
 	return nil
+}
+
+func (c *nadController) getNetworkIDFromNode(nadNetwork util.NetInfo) (int, error) {
+	// check if the node has a legacy ID
+	nodes, err := c.nodeLister.List(labels.Everything())
+	if err != nil {
+		return types.InvalidID, fmt.Errorf("failed to list nodes: %w", err)
+	}
+	// sort to make retrieval semi-consistent across nodes
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].CreationTimestamp.Before(&nodes[j].CreationTimestamp)
+	})
+	netName := nadNetwork.GetNetworkName()
+	// Find from node annotations
+	for _, node := range nodes {
+		idMap, err := util.GetNodeNetworkIDsAnnotationNetworkIDs(node)
+		if err != nil {
+			continue
+		}
+		if v, ok := idMap[netName]; ok && v != types.InvalidID {
+			return v, nil
+		}
+	}
+	return types.InvalidID, nil
 }
 
 func (c *nadController) GetActiveNetwork(network string) util.NetInfo {
