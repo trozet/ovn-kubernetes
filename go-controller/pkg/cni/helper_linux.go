@@ -56,14 +56,52 @@ func (defaultCNIPluginLibOps) ReplaceRouteECMP(ipn *net.IPNet, gw net.IP, devs [
 	}
 
 	ecmpRoute.MultiPath = make([]*netlink.NexthopInfo, len(devs))
+	allOnlink := len(devs) > 0
 	for i, dev := range devs {
+		onlink, err := isGatewayOnLink(gw, dev)
+		if err != nil {
+			return err
+		}
+		if !onlink {
+			allOnlink = false
+		}
 		ecmpRoute.MultiPath[i] = &netlink.NexthopInfo{
 			LinkIndex: dev.Attrs().Index,
 			Gw:        gw,
 			Hops:      0, // Weight (0 means weight of 1)
 		}
+		if onlink {
+			ecmpRoute.MultiPath[i].Flags = int(netlink.FLAG_ONLINK)
+		}
+	}
+	if allOnlink {
+		ecmpRoute.Flags = int(netlink.FLAG_ONLINK)
 	}
 	return util.GetNetLinkOps().RouteReplace(ecmpRoute)
+}
+
+func isGatewayOnLink(gw net.IP, dev netlink.Link) (bool, error) {
+	if len(gw) == 0 || dev == nil {
+		return false, nil
+	}
+
+	family := netlink.FAMILY_V6
+	if gw.To4() != nil {
+		family = netlink.FAMILY_V4
+	}
+
+	addrs, err := util.GetNetLinkOps().AddrList(dev, family)
+	if err != nil {
+		return false, fmt.Errorf("failed to list addresses for %s: %v", dev.Attrs().Name, err)
+	}
+
+	for _, addr := range addrs {
+		if addr.IPNet != nil && addr.IPNet.Contains(gw) {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func (defaultCNIPluginLibOps) SetupVeth(contVethName string, hostVethName string, mtu int, contVethMac string, hostNS ns.NetNS) (net.Interface, net.Interface, error) {
