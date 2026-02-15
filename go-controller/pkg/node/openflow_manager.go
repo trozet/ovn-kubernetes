@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,14 +20,27 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 )
 
+const (
+	openFlowSyncPeriod            = 15 * time.Second
+	openFlowForcedReconcilePeriod = 5 * time.Minute
+	// Avoid issuing too many ovs-ofctl processes for per-cookie count checks.
+	openFlowCookieCountCheckLimit = 128
+)
+
 type openflowManager struct {
 	defaultBridge         *bridgeconfig.BridgeConfiguration
 	externalGatewayBridge *bridgeconfig.BridgeConfiguration
 	// flow cache, use map instead of array for readability when debugging
-	flowCache     map[string][]string
-	flowMutex     sync.Mutex
-	exGWFlowCache map[string][]string
-	exGWFlowMutex sync.Mutex
+	flowCache           map[string][]string
+	flowGeneration      uint64
+	flowAppliedGen      uint64
+	flowLastReplaceTime time.Time
+	flowMutex           sync.Mutex
+	exGWFlowCache       map[string][]string
+	exGWFlowGeneration  uint64
+	exGWFlowAppliedGen  uint64
+	exGWLastReplaceTime time.Time
+	exGWFlowMutex       sync.Mutex
 	// channel to indicate we need to update flows immediately
 	flowChan chan struct{}
 }
@@ -88,12 +102,14 @@ func (c *openflowManager) updateFlowCacheEntry(key string, flows []string) {
 	c.flowMutex.Lock()
 	defer c.flowMutex.Unlock()
 	c.flowCache[key] = flows
+	c.flowGeneration++
 }
 
 func (c *openflowManager) deleteFlowsByKey(key string) {
 	c.flowMutex.Lock()
 	defer c.flowMutex.Unlock()
 	delete(c.flowCache, key)
+	c.flowGeneration++
 }
 
 func (c *openflowManager) getFlowsByKey(key string) []string {
@@ -106,6 +122,7 @@ func (c *openflowManager) updateExBridgeFlowCacheEntry(key string, flows []strin
 	c.exGWFlowMutex.Lock()
 	defer c.exGWFlowMutex.Unlock()
 	c.exGWFlowCache[key] = flows
+	c.exGWFlowGeneration++
 }
 
 func (c *openflowManager) requestFlowSync() {
@@ -120,23 +137,59 @@ func (c *openflowManager) requestFlowSync() {
 func (c *openflowManager) syncFlows() {
 	c.flowMutex.Lock()
 	flows := flattenFlowCacheEntries(c.flowCache)
+	flowGeneration := c.flowGeneration
+	flowAppliedGen := c.flowAppliedGen
+	flowLastReplaceTime := c.flowLastReplaceTime
 	c.flowMutex.Unlock()
 
-	_, stderr, err := util.ReplaceOFFlows(c.defaultBridge.GetBridgeName(), flows)
+	shouldSyncDefault, err := shouldSyncBridgeFlows(c.defaultBridge.GetBridgeName(), flows, flowGeneration, flowAppliedGen, flowLastReplaceTime)
 	if err != nil {
-		klog.Errorf("Failed to add flows for bridge %s, error: %v, stderr, %s, flow count: %d",
-			c.defaultBridge.GetBridgeName(), err, stderr, len(flows))
+		klog.Warningf("Failed pre-sync flow count check for bridge %s: %v", c.defaultBridge.GetBridgeName(), err)
+	}
+	if shouldSyncDefault {
+		_, stderr, err := util.ReplaceOFFlows(c.defaultBridge.GetBridgeName(), flows)
+		if err != nil {
+			klog.Errorf("Failed to add flows for bridge %s, error: %v, stderr, %s, flow count: %d",
+				c.defaultBridge.GetBridgeName(), err, stderr, len(flows))
+		} else {
+			c.flowMutex.Lock()
+			c.flowAppliedGen = flowGeneration
+			c.flowLastReplaceTime = time.Now()
+			c.flowMutex.Unlock()
+		}
+	} else {
+		klog.V(5).Infof("Skipping replace-flows for bridge %s; flow cookie counts match and no cache updates pending",
+			c.defaultBridge.GetBridgeName())
 	}
 
 	if c.externalGatewayBridge != nil {
 		c.exGWFlowMutex.Lock()
 		exGWFlows := flattenFlowCacheEntries(c.exGWFlowCache)
+		exGWFlowGeneration := c.exGWFlowGeneration
+		exGWFlowAppliedGen := c.exGWFlowAppliedGen
+		exGWLastReplaceTime := c.exGWLastReplaceTime
 		c.exGWFlowMutex.Unlock()
 
-		_, stderr, err := util.ReplaceOFFlows(c.externalGatewayBridge.GetBridgeName(), exGWFlows)
+		shouldSyncExGW, err := shouldSyncBridgeFlows(c.externalGatewayBridge.GetBridgeName(), exGWFlows,
+			exGWFlowGeneration, exGWFlowAppliedGen, exGWLastReplaceTime)
 		if err != nil {
-			klog.Errorf("Failed to add flows for bridge %s, error: %v, stderr, %s, flow count: %d",
-				c.externalGatewayBridge.GetBridgeName(), err, stderr, len(exGWFlows))
+			klog.Warningf("Failed pre-sync flow count check for bridge %s: %v",
+				c.externalGatewayBridge.GetBridgeName(), err)
+		}
+		if shouldSyncExGW {
+			_, stderr, err := util.ReplaceOFFlows(c.externalGatewayBridge.GetBridgeName(), exGWFlows)
+			if err != nil {
+				klog.Errorf("Failed to add flows for bridge %s, error: %v, stderr, %s, flow count: %d",
+					c.externalGatewayBridge.GetBridgeName(), err, stderr, len(exGWFlows))
+			} else {
+				c.exGWFlowMutex.Lock()
+				c.exGWFlowAppliedGen = exGWFlowGeneration
+				c.exGWLastReplaceTime = time.Now()
+				c.exGWFlowMutex.Unlock()
+			}
+		} else {
+			klog.V(5).Infof("Skipping replace-flows for bridge %s; flow cookie counts match and no cache updates pending",
+				c.externalGatewayBridge.GetBridgeName())
 		}
 	}
 }
@@ -151,6 +204,77 @@ func flattenFlowCacheEntries(flowCache map[string][]string) []string {
 		flows = append(flows, entry...)
 	}
 	return flows
+}
+
+func shouldSyncBridgeFlows(bridgeName string, flows []string, flowGeneration, flowAppliedGen uint64, lastReplaceTime time.Time) (bool, error) {
+	if flowGeneration != flowAppliedGen {
+		return true, nil
+	}
+	if lastReplaceTime.IsZero() || time.Since(lastReplaceTime) >= openFlowForcedReconcilePeriod {
+		return true, nil
+	}
+	expectedCountsByCookie, ok := countFlowsByCookie(flows)
+	if !ok {
+		// If not all flow strings include cookies we cannot safely verify by cookie count.
+		return true, nil
+	}
+	if len(expectedCountsByCookie) == 0 {
+		// Empty desired flow set should still be pushed periodically in case the bridge has stale flows.
+		return true, nil
+	}
+	if len(expectedCountsByCookie) > openFlowCookieCountCheckLimit {
+		return true, nil
+	}
+	cookieCountsMatch, err := doFlowCookieCountsMatch(bridgeName, expectedCountsByCookie)
+	if err != nil {
+		return true, err
+	}
+	return !cookieCountsMatch, nil
+}
+
+func doFlowCookieCountsMatch(bridgeName string, expectedCountsByCookie map[string]int) (bool, error) {
+	for cookie, expectedCount := range expectedCountsByCookie {
+		actualCount, err := util.GetOpenFlowFlowCountByCookie(bridgeName, cookie)
+		if err != nil {
+			return false, err
+		}
+		if actualCount != expectedCount {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func countFlowsByCookie(flows []string) (map[string]int, bool) {
+	countsByCookie := make(map[string]int)
+	for _, flow := range flows {
+		cookie, ok := extractCookieFromFlow(flow)
+		if !ok {
+			return nil, false
+		}
+		countsByCookie[cookie]++
+	}
+	return countsByCookie, true
+}
+
+func extractCookieFromFlow(flow string) (string, bool) {
+	const cookiePrefix = "cookie="
+	start := strings.Index(flow, cookiePrefix)
+	if start == -1 {
+		return "", false
+	}
+	cookie := flow[start+len(cookiePrefix):]
+	if end := strings.IndexAny(cookie, ", \t\n"); end >= 0 {
+		cookie = cookie[:end]
+	}
+	cookie = strings.TrimSpace(cookie)
+	if cookie == "" {
+		return "", false
+	}
+	if _, err := strconv.ParseUint(cookie, 0, 64); err != nil {
+		return "", false
+	}
+	return cookie, true
 }
 
 // since we share the host's k8s node IP, add OpenFlow flows
@@ -182,8 +306,7 @@ func (c *openflowManager) Run(stopChan <-chan struct{}, doneWg *sync.WaitGroup) 
 	doneWg.Add(1)
 	go func() {
 		defer doneWg.Done()
-		syncPeriod := 15 * time.Second
-		timer := time.NewTicker(syncPeriod)
+		timer := time.NewTicker(openFlowSyncPeriod)
 		defer timer.Stop()
 		for {
 			select {
@@ -203,7 +326,7 @@ func (c *openflowManager) Run(stopChan <-chan struct{}, doneWg *sync.WaitGroup) 
 				c.syncFlows()
 			case <-c.flowChan:
 				c.syncFlows()
-				timer.Reset(syncPeriod)
+				timer.Reset(openFlowSyncPeriod)
 			case <-stopChan:
 				// sync before shutting down because flows maybe added, and theres a race between flow channel (req sync)
 				// and stop chan on shutdown. ensure flows are sync before shut down
@@ -234,7 +357,7 @@ func (c *openflowManager) updateBridgeFlowCache(hostIPs []net.IP, hostSubnets []
 		return err
 	}
 
-	c.updateFlowCacheEntry("NORMAL", []string{fmt.Sprintf("table=0,priority=0,actions=%s\n", util.NormalAction)})
+	c.updateFlowCacheEntry("NORMAL", []string{fmt.Sprintf("cookie=%s,table=0,priority=0,actions=%s", nodetypes.DefaultOpenFlowCookie, util.NormalAction)})
 	c.updateFlowCacheEntry("DEFAULT", dftFlows)
 
 	// we consume ex gw bridge flows only if that is enabled
@@ -244,7 +367,7 @@ func (c *openflowManager) updateBridgeFlowCache(hostIPs []net.IP, hostSubnets []
 			return err
 		}
 
-		c.updateExBridgeFlowCacheEntry("NORMAL", []string{fmt.Sprintf("table=0,priority=0,actions=%s\n", util.NormalAction)})
+		c.updateExBridgeFlowCacheEntry("NORMAL", []string{fmt.Sprintf("cookie=%s,table=0,priority=0,actions=%s", nodetypes.DefaultOpenFlowCookie, util.NormalAction)})
 		c.updateExBridgeFlowCacheEntry("DEFAULT", exGWBridgeDftFlows)
 	}
 	return nil

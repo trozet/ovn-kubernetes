@@ -942,6 +942,107 @@ func TestRunOVSOfctl(t *testing.T) {
 	}
 }
 
+func TestParseAggregateFlowCount(t *testing.T) {
+	tests := []struct {
+		desc      string
+		stdout    string
+		wantCount int
+		wantErr   bool
+	}{
+		{
+			desc:      "valid aggregate output",
+			stdout:    "NXST_AGGREGATE reply (xid=0x4): packet_count=10 byte_count=20 flow_count=42",
+			wantCount: 42,
+			wantErr:   false,
+		},
+		{
+			desc:      "invalid aggregate output",
+			stdout:    "NXST_AGGREGATE reply (xid=0x4): packet_count=10 byte_count=20",
+			wantCount: 0,
+			wantErr:   true,
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(fmt.Sprintf("%d:%s", i, tc.desc), func(t *testing.T) {
+			got, err := parseAggregateFlowCount(tc.stdout)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantCount, got)
+		})
+	}
+}
+
+func TestGetOpenFlowFlowCountByCookie(t *testing.T) {
+	mockKexecIface := new(mock_k8s_io_utils_exec.Interface)
+	mockExecRunner := new(mocks.ExecRunner)
+	mockCmd := new(mock_k8s_io_utils_exec.Cmd)
+	RunCmdExecRunner = mockExecRunner
+	runner = &execHelper{exec: mockKexecIface}
+
+	tests := []struct {
+		desc                    string
+		cookie                  string
+		expectedCount           int
+		expectedErr             bool
+		onRetArgsExecUtilsIface *ovntest.TestifyMockHelper
+		onRetArgsKexecIface     *ovntest.TestifyMockHelper
+	}{
+		{
+			desc:          "positive: parse flow count",
+			cookie:        "0xdeff105",
+			expectedCount: 17,
+			expectedErr:   false,
+			onRetArgsExecUtilsIface: &ovntest.TestifyMockHelper{
+				OnCallMethodName:    "RunCmd",
+				OnCallMethodArgType: []string{"*mocks.Cmd", "string", "[]string", "string", "string", "string", "string", "string"},
+				RetArgList:          []interface{}{bytes.NewBuffer([]byte("NXST_AGGREGATE reply: packet_count=1 byte_count=2 flow_count=17")), bytes.NewBuffer([]byte("")), nil},
+			},
+			onRetArgsKexecIface: &ovntest.TestifyMockHelper{
+				OnCallMethodName:    "Command",
+				OnCallMethodArgType: []string{"string", "string", "string", "string", "string", "string"},
+				RetArgList:          []interface{}{mockCmd},
+			},
+		},
+		{
+			desc:          "negative: parse error",
+			cookie:        "0xdeff105",
+			expectedCount: 0,
+			expectedErr:   true,
+			onRetArgsExecUtilsIface: &ovntest.TestifyMockHelper{
+				OnCallMethodName:    "RunCmd",
+				OnCallMethodArgType: []string{"*mocks.Cmd", "string", "[]string", "string", "string", "string", "string", "string"},
+				RetArgList:          []interface{}{bytes.NewBuffer([]byte("NXST_AGGREGATE reply: packet_count=1 byte_count=2")), bytes.NewBuffer([]byte("")), nil},
+			},
+			onRetArgsKexecIface: &ovntest.TestifyMockHelper{
+				OnCallMethodName:    "Command",
+				OnCallMethodArgType: []string{"string", "string", "string", "string", "string", "string"},
+				RetArgList:          []interface{}{mockCmd},
+			},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(fmt.Sprintf("%d:%s", i, tc.desc), func(t *testing.T) {
+			ovntest.ProcessMockFn(&mockExecRunner.Mock, *tc.onRetArgsExecUtilsIface)
+			ovntest.ProcessMockFn(&mockKexecIface.Mock, *tc.onRetArgsKexecIface)
+
+			gotCount, err := GetOpenFlowFlowCountByCookie("br-ex", tc.cookie)
+			if tc.expectedErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.expectedCount, gotCount)
+			}
+			mockExecRunner.AssertExpectations(t)
+			mockKexecIface.AssertExpectations(t)
+		})
+	}
+}
+
 func TestGetOpenFlowPorts(t *testing.T) {
 	// ovs-ofctl show breth0 mock output
 	ofctlOutput := `

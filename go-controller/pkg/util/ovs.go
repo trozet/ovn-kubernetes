@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -59,6 +60,8 @@ var (
 	ovsRunDir string = config.OvsPaths.RunDir
 	ovnRunDir string = config.OvnSouth.RunDir
 )
+
+var aggregateFlowCountRegex = regexp.MustCompile(`flow_count=(\d+)`)
 
 var ovnCmdRetryInterval = 2 * time.Second
 var ovnCmdRetryCount = 200
@@ -319,6 +322,35 @@ func runWithEnvVars(cmdPath string, envVars []string, args ...string) (*bytes.Bu
 func RunOVSOfctl(args ...string) (string, string, error) {
 	stdout, stderr, err := run(runner.ofctlPath, args...)
 	return strings.Trim(stdout.String(), "\" \n"), stderr.String(), err
+}
+
+func parseAggregateFlowCount(stdout string) (int, error) {
+	match := aggregateFlowCountRegex.FindStringSubmatch(stdout)
+	if len(match) != 2 {
+		return 0, fmt.Errorf("unable to parse flow_count from output: %q", stdout)
+	}
+	count, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0, fmt.Errorf("unable to convert flow_count %q to int: %w", match[1], err)
+	}
+	return count, nil
+}
+
+// GetOpenFlowFlowCountByCookie returns the number of flows on a bridge that match
+// an exact OpenFlow cookie value.
+func GetOpenFlowFlowCountByCookie(bridgeName, cookie string) (int, error) {
+	flowFilter := fmt.Sprintf("cookie=%s/0xffffffffffffffff", cookie)
+	stdout, stderr, err := RunOVSOfctl("-O", "OpenFlow13", "dump-aggregate", bridgeName, flowFilter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to dump aggregate flows for bridge %q and cookie %q, stderr: %q: %w",
+			bridgeName, cookie, stderr, err)
+	}
+	count, parseErr := parseAggregateFlowCount(stdout)
+	if parseErr != nil {
+		return 0, fmt.Errorf("failed to parse aggregate flow count for bridge %q and cookie %q: %w",
+			bridgeName, cookie, parseErr)
+	}
+	return count, nil
 }
 
 // RunOVSVsctl runs a command via ovs-vsctl.
