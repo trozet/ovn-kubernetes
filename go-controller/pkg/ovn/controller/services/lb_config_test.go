@@ -6,6 +6,8 @@ package services
 import (
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -2849,6 +2851,125 @@ func Test_buildPerNodeLBs(t *testing.T) {
 		})
 	}
 
+}
+
+// Test_buildTemplateLBs_multipleTargetPorts verifies that when multiple target
+// ports coexist (e.g. during a rolling update), buildTemplateLBs produces
+// template values that include targets for ALL port numbers, not just the last
+// one processed.
+func Test_buildTemplateLBs_multipleTargetPorts(t *testing.T) {
+	oldGwMode := globalconfig.Gateway.Mode
+	oldClusterSubnet := globalconfig.Default.ClusterSubnets
+	oldIPv4Mode := globalconfig.IPv4Mode
+	defer func() {
+		globalconfig.Gateway.Mode = oldGwMode
+		globalconfig.Default.ClusterSubnets = oldClusterSubnet
+		globalconfig.IPv4Mode = oldIPv4Mode
+	}()
+
+	_, cidr4, _ := net.ParseCIDR("10.128.0.0/16")
+	globalconfig.Default.ClusterSubnets = []globalconfig.CIDRNetworkEntry{{CIDR: cidr4, HostSubnetLength: 26}}
+	globalconfig.Gateway.Mode = globalconfig.GatewayModeShared
+	globalconfig.IPv4Mode = true
+
+	name := "foo"
+	namespace := "testns"
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeNodePort,
+		},
+	}
+
+	// Two nodes are needed so that ETP=local creates per-node differences,
+	// which forces the template path (needsTemplate=true).
+	nodes := []nodeInfo{
+		{
+			name:               nodeA,
+			l3gatewayAddresses: []net.IP{net.ParseIP("10.0.0.1")},
+			hostAddresses:      []net.IP{net.ParseIP("10.0.0.1")},
+			chassisID:          "chassis-a",
+			gatewayRouterName:  "gr-node-a",
+			switchName:         "switch-node-a",
+			podSubnets:         []net.IPNet{{IP: net.ParseIP("10.128.0.0"), Mask: net.CIDRMask(24, 32)}},
+		},
+		{
+			name:               nodeB,
+			l3gatewayAddresses: []net.IP{net.ParseIP("10.0.0.2")},
+			hostAddresses:      []net.IP{net.ParseIP("10.0.0.2")},
+			chassisID:          "chassis-b",
+			gatewayRouterName:  "gr-node-b",
+			switchName:         "switch-node-b",
+			podSubnets:         []net.IPNet{{IP: net.ParseIP("10.128.1.0"), Mask: net.CIDRMask(24, 32)}},
+		},
+	}
+
+	nodeIPv4Templates := NewNodeIPsTemplates(corev1.IPv4Protocol)
+	nodeIPv4Templates.AddIP("chassis-a", net.ParseIP("10.0.0.1"))
+	nodeIPv4Templates.AddIP("chassis-b", net.ParseIP("10.0.0.2"))
+	nodeIPv6Templates := NewNodeIPsTemplates(corev1.IPv6Protocol)
+
+	// Simulate a rolling update with ETP=local: port 8080 endpoints are on
+	// nodeA, port 9090 endpoints are on nodeB. This creates per-node
+	// differences that force the template code path.
+	configs := []lbConfig{
+		{
+			vips:     []string{placeholderNodeIPs},
+			protocol: corev1.ProtocolTCP,
+			inport:   80,
+			clusterEndpoints: util.LBEndpoints{
+				{Port: 8080, V4IPs: []string{"192.168.0.1"}},
+				{Port: 9090, V4IPs: []string{"192.168.0.2"}},
+			},
+			nodeEndpoints: util.PortToLBEndpoints{
+				nodeA: {
+					{Port: 8080, V4IPs: []string{"192.168.0.1"}},
+				},
+				nodeB: {
+					{Port: 9090, V4IPs: []string{"192.168.0.2"}},
+				},
+			},
+			externalTrafficLocal: true,
+			hasNodePort:          true,
+		},
+	}
+
+	result := buildTemplateLBs(service, configs, nodes, nodeIPv4Templates, nodeIPv6Templates, &util.DefaultNetInfo{})
+	require.NotEmpty(t, result, "expected at least one template LB")
+
+	// For each LB, collect all target ports from all rules. With templates,
+	// the per-chassis values are strings like "192.168.0.1:8080,192.168.0.2:9090".
+	// Before the fix, the template value would only contain one port's
+	// targets because the second portno iteration overwrote the first.
+	for _, lb := range result {
+		allTargetPorts := sets.New[int32]()
+		for _, rule := range lb.Rules {
+			for _, tgt := range rule.Targets {
+				if tgt.Template != nil {
+					for _, value := range tgt.Template.Value {
+						for _, addr := range strings.Split(value, ",") {
+							if addr == "" {
+								continue
+							}
+							parts := strings.Split(addr, ":")
+							if len(parts) == 2 {
+								port, err := strconv.Atoi(parts[1])
+								if err == nil {
+									allTargetPorts.Insert(int32(port))
+								}
+							}
+						}
+					}
+				} else if tgt.Port != 0 {
+					allTargetPorts.Insert(tgt.Port)
+				}
+			}
+		}
+		assert.True(t, allTargetPorts.Has(8080),
+			"LB %q should have targets with port 8080, got ports: %v", lb.Name, allTargetPorts.UnsortedList())
+		assert.True(t, allTargetPorts.Has(9090),
+			"LB %q should have targets with port 9090, got ports: %v", lb.Name, allTargetPorts.UnsortedList())
+	}
 }
 
 func Test_idledServices(t *testing.T) {
