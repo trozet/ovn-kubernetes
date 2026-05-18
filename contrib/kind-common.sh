@@ -332,8 +332,10 @@ build_ovn_image() {
 }
 
 run_kubectl() {
-  # Skip kubeconfig export in container mode - it overwrites container IPs with localhost.
-  if [ "$RUN_IN_CONTAINER" != true ]; then
+  # In deploy mode, KUBECONFIG points at an existing cluster and must not be
+  # merged with `kind export kubeconfig`; repeated merges can duplicate entries.
+  # In container mode, export would also overwrite reachable container IPs with localhost.
+  if [ "$RUN_IN_CONTAINER" != true ] && [ "${KIND_CREATE:-true}" == true ]; then
     kind export kubeconfig --name ${KIND_CLUSTER_NAME}
   fi
 
@@ -771,6 +773,9 @@ kubectl_wait_pods() {
     kubectl wait pods -n ovn-kubernetes -l name=${name} --for condition=Ready --timeout=${timeout}s
   done
 
+  restart_dpu_sim_multus_after_ovnk
+  restart_dpu_sim_system_deployments_after_ovnk
+
   timeout=$(calculate_timeout ${endtime})
   if ! kubectl wait -n kube-system --for=condition=ready pods --all --timeout=${timeout}s ; then
     echo "some pods in the system are not running"
@@ -915,10 +920,73 @@ docker_create_second_disconnected_interface() {
 }
 
 enable_multi_net() {
-  install_multus
+  if [ "${DPU_MODE:-none}" == "none" ]; then
+    install_multus
+  else
+    echo "Skipping multus-cni installation; DPU simulator mode expects Multus to be installed by dpu-simulator"
+  fi
   install_mpolicy_crd
   install_ipamclaim_crd
   docker_create_second_disconnected_interface "underlay"  # localnet scenarios require an extra interface
+}
+
+restart_dpu_sim_multus_after_ovnk() {
+  if [ "${DPU_MODE:-none}" == "none" ] || [ "${ENABLE_MULTI_NET:-false}" != true ]; then
+    return
+  fi
+
+  if ! kubectl -n kube-system get daemonset kube-multus-ds >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "Restarting dpu-simulator Multus after OVN-Kubernetes is ready..."
+  kubectl -n kube-system rollout restart daemonset/kube-multus-ds
+  kubectl -n kube-system rollout status daemonset/kube-multus-ds --timeout 2m
+}
+
+resume_dpu_sim_system_deployment() {
+  local namespace=$1
+  local name=$2
+  local kubeconfig=${3:-}
+  local kubectl_cmd=(kubectl)
+
+  if [ -n "${kubeconfig}" ]; then
+    kubectl_cmd=(kubectl --kubeconfig "${kubeconfig}")
+  fi
+
+  if ! "${kubectl_cmd[@]}" -n "${namespace}" get deployment "${name}" >/dev/null 2>&1; then
+    return
+  fi
+
+  local replicas
+  replicas=$("${kubectl_cmd[@]}" -n "${namespace}" get deployment "${name}" -o jsonpath='{.metadata.annotations.dpu-sim\.io/suspend-replicas}')
+  if [ -n "${replicas}" ]; then
+    echo "Restoring dpu-simulator deployment ${namespace}/${name} to ${replicas} replicas..."
+    "${kubectl_cmd[@]}" -n "${namespace}" patch deployment "${name}" --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/replicas\",\"value\":${replicas}},{\"op\":\"remove\",\"path\":\"/metadata/annotations/dpu-sim.io~1suspend-replicas\"}]"
+  fi
+
+  "${kubectl_cmd[@]}" -n "${namespace}" rollout restart deployment/"${name}"
+  "${kubectl_cmd[@]}" -n "${namespace}" rollout status deployment/"${name}" --timeout 2m
+}
+
+restart_dpu_sim_system_deployments_after_ovnk() {
+  if [ "${DPU_MODE:-none}" == "none" ]; then
+    return
+  fi
+
+  if [ "${DPU_MODE}" == "host" ]; then
+    echo "Leaving dpu-simulator host system deployments suspended until DPU OVN-Kubernetes is installed"
+    return
+  fi
+
+  resume_dpu_sim_system_deployment kube-system coredns
+  resume_dpu_sim_system_deployment local-path-storage local-path-provisioner
+
+  if [ "${DPU_MODE}" == "dpu" ] && [ -n "${FRR_K8S_HOST_KUBECONFIG:-}" ]; then
+    echo "Restoring dpu-simulator host system deployments after DPU OVN-Kubernetes is ready..."
+    resume_dpu_sim_system_deployment kube-system coredns "${FRR_K8S_HOST_KUBECONFIG}"
+    resume_dpu_sim_system_deployment local-path-storage local-path-provisioner "${FRR_K8S_HOST_KUBECONFIG}"
+  fi
 }
 
 kind_get_nodes() {
@@ -1237,7 +1305,18 @@ deploy_frr_external_container() {
     # Add route-reflector-client for IPv6 neighbors
     sed -i '/neighbor fc00.*remote-as 64512/a \ neighbor {{ . }} route-reflector-client' frr/frr.conf.tmpl
   fi
-  ./demo.sh
+  if [ "${OCI_BIN}" == "podman" ]; then
+    # frr-k8s' demo script prefers docker when both docker and podman are
+    # installed. Keep it on the same runtime as kind-helm.sh so later podman
+    # operations can find the external frr container.
+    local docker_wrapper_dir
+    docker_wrapper_dir=$(mktemp -d)
+    ln -s "$(command -v podman)" "${docker_wrapper_dir}/docker"
+    PATH="${docker_wrapper_dir}:${PATH}" ./demo.sh
+    rm -rf "${docker_wrapper_dir}"
+  else
+    ./demo.sh
+  fi
   popd || exit 1
   if  [ "$PLATFORM_IPV6_SUPPORT" == true ]; then
     # Enable IPv6 forwarding in FRR
@@ -1369,6 +1448,113 @@ destroy_bgp() {
   fi
 }
 
+frr_k8s_remote_enabled() {
+  [[ -n "${FRR_K8S_REMOTE_KUBECONFIG:-}" || -n "${FRR_K8S_REMOTE_NODE_MAP:-}" ]]
+}
+
+validate_frr_k8s_remote() {
+  if ! frr_k8s_remote_enabled; then
+    return
+  fi
+  if [[ -z "${FRR_K8S_REMOTE_KUBECONFIG:-}" || -z "${FRR_K8S_REMOTE_NODE_MAP:-}" ]]; then
+    echo "FRR-K8S remote mode requires both FRR_K8S_REMOTE_KUBECONFIG and FRR_K8S_REMOTE_NODE_MAP" >&2
+    exit 1
+  fi
+  if [[ ! -f "${FRR_K8S_REMOTE_KUBECONFIG}" ]]; then
+    echo "FRR-K8S remote kubeconfig does not exist: ${FRR_K8S_REMOTE_KUBECONFIG}" >&2
+    exit 1
+  fi
+  if [[ -n "${FRR_K8S_HOST_KUBECONFIG:-}" && ! -f "${FRR_K8S_HOST_KUBECONFIG}" ]]; then
+    echo "FRR-K8S host kubeconfig does not exist: ${FRR_K8S_HOST_KUBECONFIG}" >&2
+    exit 1
+  fi
+}
+
+frr_k8s_host_kubeconfig() {
+  printf '%s' "${FRR_K8S_HOST_KUBECONFIG:-${FRR_K8S_REMOTE_KUBECONFIG}}"
+}
+
+install_frr_k8s_host_api_crds() {
+  validate_frr_k8s_remote
+  if ! frr_k8s_remote_enabled; then
+    return
+  fi
+
+  echo "Installing frr-k8s CRDs into the remote host API ..."
+  local host_kubeconfig
+  host_kubeconfig=$(frr_k8s_host_kubeconfig)
+  kubectl --kubeconfig "${host_kubeconfig}" apply \
+    -f "${FRR_TMP_DIR}"/frr-k8s/config/crd/bases/frrk8s.metallb.io_frrconfigurations.yaml
+  kubectl --kubeconfig "${host_kubeconfig}" apply \
+    -f "${FRR_TMP_DIR}"/frr-k8s/config/crd/bases/frrk8s.metallb.io_frrnodestates.yaml
+}
+
+install_frr_k8s_crds() {
+  echo "Installing frr-k8s CRDs ..."
+  clone_frr
+  kubectl apply -f "${FRR_TMP_DIR}"/frr-k8s/config/crd/bases/frrk8s.metallb.io_frrconfigurations.yaml
+  kubectl apply -f "${FRR_TMP_DIR}"/frr-k8s/config/crd/bases/frrk8s.metallb.io_frrnodestates.yaml
+}
+
+create_frr_k8s_remote_kubeconfig_secret() {
+  validate_frr_k8s_remote
+  if ! frr_k8s_remote_enabled; then
+    return
+  fi
+
+  kubectl -n frr-k8s-system create secret generic frr-k8s-host-kubeconfig \
+    --from-file=kubeconfig="${FRR_K8S_REMOTE_KUBECONFIG}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
+
+configure_frr_k8s_remote_daemonsets() {
+  validate_frr_k8s_remote
+  if ! frr_k8s_remote_enabled; then
+    return
+  fi
+
+  local source_json="${FRR_TMP_DIR}/frr-k8s-daemon.json"
+  kubectl -n frr-k8s-system get daemonset frr-k8s-daemon -o json > "${source_json}"
+  kubectl -n frr-k8s-system delete daemonset -l dpu-sim.ovn.org/frr-remote=true --ignore-not-found
+
+  local pair host_node dpu_node safe_name ds_name
+  IFS=',' read -ra pairs <<< "${FRR_K8S_REMOTE_NODE_MAP}"
+  for pair in "${pairs[@]}"; do
+    host_node="${pair%%=*}"
+    dpu_node="${pair#*=}"
+    if [[ -z "${host_node}" || -z "${dpu_node}" || "${pair}" != *"="* ]]; then
+      echo "Invalid FRR_K8S_REMOTE_NODE_MAP entry: ${pair}" >&2
+      exit 1
+    fi
+    safe_name=$(printf '%s' "${host_node}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/^-*//;s/-*$//')
+    if [[ -z "${safe_name}" ]]; then
+      echo "Invalid host node name for FRR_K8S_REMOTE_NODE_MAP entry: ${pair}" >&2
+      exit 1
+    fi
+    ds_name="frr-k8s-daemon-${safe_name:0:45}"
+    echo "Creating remote frr-k8s daemonset ${ds_name}: host node ${host_node}, DPU node ${dpu_node}"
+    jq \
+      --arg name "${ds_name}" \
+      --arg host_node "${host_node}" \
+      --arg dpu_node "${dpu_node}" \
+      'del(.metadata.uid, .metadata.resourceVersion, .metadata.generation, .metadata.creationTimestamp, .metadata.managedFields, .status)
+       | .metadata.name = $name
+       | .metadata.labels["dpu-sim.ovn.org/frr-remote"] = "true"
+       | .metadata.labels["dpu-sim.ovn.org/frr-host-node"] = $host_node
+       | .spec.selector.matchLabels["dpu-sim.ovn.org/frr-host-node"] = $host_node
+       | .spec.template.metadata.labels["dpu-sim.ovn.org/frr-remote"] = "true"
+       | .spec.template.metadata.labels["dpu-sim.ovn.org/frr-host-node"] = $host_node
+       | .spec.template.spec.nodeSelector = {"kubernetes.io/hostname": $dpu_node}
+       | (.spec.template.spec.containers[] | select(.name == "frr-k8s").args) |= ((. // []) | map(if startswith("--node-name=") then "--node-name=" + $host_node else . end))
+       | (.spec.template.spec.containers[] | select(.name == "frr-k8s").env) |= ((. // []) + [{"name":"KUBECONFIG","value":"/var/run/host-kubeconfig/kubeconfig"}])
+       | (.spec.template.spec.containers[] | select(.name == "frr-k8s").volumeMounts) |= ((. // []) + [{"name":"host-kubeconfig","mountPath":"/var/run/host-kubeconfig","readOnly":true}])
+       | .spec.template.spec.volumes = ((.spec.template.spec.volumes // []) + [{"name":"host-kubeconfig","secret":{"secretName":"frr-k8s-host-kubeconfig"}}])' \
+      "${source_json}" | kubectl apply -f -
+  done
+
+  kubectl -n frr-k8s-system delete daemonset frr-k8s-daemon --ignore-not-found
+}
+
 install_frr_k8s() {
   local bgp_port=${1:-0}
   echo "Installing frr-k8s ..."
@@ -1405,15 +1591,27 @@ install_frr_k8s() {
       exit 1
     }
   fi
+  install_frr_k8s_host_api_crds
   kubectl apply -f "${FRR_TMP_DIR}"/frr-k8s/config/all-in-one/frr-k8s.yaml
+  create_frr_k8s_remote_kubeconfig_secret
+  configure_frr_k8s_remote_daemonsets
 }
 
 wait_for_frr_k8s() {
-  kubectl wait -n frr-k8s-system deployment frr-k8s-statuscleaner --for condition=Available --timeout 2m
-  kubectl rollout status -n frr-k8s-system daemonset frr-k8s-daemon --timeout 2m
+  if kubectl -n frr-k8s-system get deployment frr-k8s-statuscleaner >/dev/null 2>&1; then
+    kubectl wait -n frr-k8s-system deployment frr-k8s-statuscleaner --for condition=Available --timeout 2m
+  fi
+  if kubectl -n frr-k8s-system get daemonset frr-k8s-daemon >/dev/null 2>&1; then
+    kubectl rollout status -n frr-k8s-system daemonset frr-k8s-daemon --timeout 2m
+    return
+  fi
+  local ds
+  for ds in $(kubectl -n frr-k8s-system get daemonset -l dpu-sim.ovn.org/frr-remote=true -o name); do
+    kubectl rollout status -n frr-k8s-system "${ds}" --timeout 2m
+  done
 }
 
-configure_frr_k8s() {
+apply_frr_k8s_receive_config() {
   # apply a BGP peer configration with the external gateway that does not
   # exchange routes
   pushd "${FRR_TMP_DIR}"/frr-k8s/hack/demo/configs || exit 1
@@ -1433,10 +1631,12 @@ configure_frr_k8s() {
   
   # frr-k8s webhook is declaring readiness before its endpoint is serving.
   # Let's do our own probing. Also will print logs in case of failure so we get
-  # insights on why this is hapenning 
+  # insights on why this is hapenning. In remote mode the host API does not use
+  # the DPU-cluster webhook service, so skip this probe.
   local r
   r=0
-  timeout 60s bash -x <<EOF || r=$?
+  if ! frr_k8s_remote_enabled; then
+    timeout 60s bash -x <<EOF || r=$?
 echo "Attempting to reach frr-k8s webhook"
 kind export kubeconfig --name ovn
 while true; do
@@ -1449,16 +1649,22 @@ echo "Couldn't reach frr-k8s webhook, trying in 1s..."
 sleep 1s
 done
 EOF
+  fi
   echo "r=$r"
   if [ "$r" -ne "0" ]; then
     kubectl describe pod -n frr-k8s-system -l app=frr-k8s-webhook-server
     kubectl logs -n frr-k8s-system -l app=frr-k8s-webhook-server
   fi
 
-  kubectl apply -n frr-k8s-system -f receive_filtered.yaml
+  local kubectl_cmd=(kubectl)
+  if frr_k8s_remote_enabled; then
+    kubectl_cmd=(kubectl --kubeconfig "$(frr_k8s_host_kubeconfig)")
+  fi
+  "${kubectl_cmd[@]}" apply -n frr-k8s-system -f receive_filtered.yaml
   popd || exit 1
+}
 
-  rm -rf "${FRR_TMP_DIR}"
+configure_frr_k8s_routes() {
   # Add routes for pod networks dynamically into the github runner for return traffic to pass back
   if [ "$ADVERTISE_DEFAULT_NETWORK" = "true" ]; then
     echo "Adding routes for Kubernetes pod networks..."
@@ -1495,6 +1701,13 @@ EOF
       fi
     done
   fi
+
+  rm -rf "${FRR_TMP_DIR}"
+}
+
+configure_frr_k8s() {
+  apply_frr_k8s_receive_config
+  configure_frr_k8s_routes
 }
 
 setup_coredumps() {
