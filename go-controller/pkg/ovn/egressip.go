@@ -48,6 +48,7 @@ import (
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
 	networkmanager "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
 	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/addresssetmanager"
 	egresssvc "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/egressservice"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/udnenabledsvc"
 	ovnretry "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/retry"
@@ -63,7 +64,7 @@ type egressIPNoReroutePolicyName string
 type egressIPQoSRuleName string
 
 const (
-	NodeIPAddrSetName             egressIPAddrSetName = "node-ips"
+	NodeIPAddrSetName             egressIPAddrSetName = addresssetmanager.ClusterNodeIPsAddrSetName
 	EgressIPServedPodsAddrSetName egressIPAddrSetName = "egressip-served-pods"
 	// the possible values for LRP DB objects for EIPs
 	IPFamilyValueV4         egressIPFamilyValue         = "ip4"
@@ -207,6 +208,8 @@ type EgressIPController struct {
 	retryEgressIPPods *ovnretry.RetryFramework
 	// An address set factory that creates address sets
 	addressSetFactory addressset.AddressSetFactory
+	// Shared address set manager that owns cluster-wide node IP address sets.
+	addressSetManager *addresssetmanager.AddressSetManager
 	// Northbound database zone name to which this Controller is connected to - aka local zone
 	zone string
 	v4   bool
@@ -223,6 +226,7 @@ func NewEIPController(
 	portCache *PortCache,
 	networkmanager networkmanager.Interface,
 	addressSetFactor addressset.AddressSetFactory,
+	addressSetManager *addresssetmanager.AddressSetManager,
 	v4 bool,
 	v6 bool,
 	zone string,
@@ -241,6 +245,7 @@ func NewEIPController(
 		controllerName:    controllerName,
 		networkManager:    networkmanager,
 		addressSetFactory: addressSetFactor,
+		addressSetManager: addressSetManager,
 		zone:              zone,
 		v4:                v4,
 		v6:                v6,
@@ -2404,6 +2409,11 @@ func (e *EgressIPController) initClusterEgressPolicies(_ []interface{}) error {
 		klog.Warningf("Failed to get a local zone node name: %v", err)
 	}
 	subnets := util.GetAllClusterSubnetsFromEntries(defaultNetInfo.Subnets())
+	if e.addressSetManager != nil {
+		if err := e.addressSetManager.EnsureClusterNodeIPsAddressSet(addresssetmanager.ClusterNodeIPsEgressIPBackRef); err != nil {
+			return fmt.Errorf("failed to ensure cluster node IP address set for EgressIP: %w", err)
+		}
+	}
 	if err := InitClusterEgressPolicies(e.nbClient, e.addressSetFactory, defaultNetInfo, subnets, e.controllerName, defaultNetInfo.GetNetworkScopedClusterRouterName()); err != nil {
 		return fmt.Errorf("failed to initialize networks cluster logical router egress policies for the default network: %v", err)
 	}
@@ -2475,7 +2485,7 @@ func InitClusterEgressPolicies(nbClient libovsdbclient.Client, addressSetFactory
 
 	// ensure the address-set for storing nodeIPs exists
 	// The address set with controller name 'default' is shared with all networks
-	dbIDs := getEgressIPAddrSetDbIDs(NodeIPAddrSetName, types.DefaultNetworkName, types.DefaultNetworkControllerName)
+	dbIDs := addresssetmanager.GetClusterNodeIPsAddrSetDbIDs()
 	if _, err = addressSetFactory.EnsureAddressSet(dbIDs); err != nil {
 		return fmt.Errorf("cannot ensure that addressSet %s exists %v", NodeIPAddrSetName, err)
 	}
@@ -3549,8 +3559,14 @@ func (e *EgressIPController) ensureRouterPoliciesForNetwork(ni util.NetInfo, nod
 	if err := InitClusterEgressPolicies(e.nbClient, e.addressSetFactory, ni, subnets, e.controllerName, routerName); err != nil {
 		return fmt.Errorf("failed to initialize networks cluster logical router egress policies for the default network: %v", err)
 	}
+	syncNodeIPsAddressSet := e.addressSetManager == nil
+	if e.addressSetManager != nil {
+		if err := e.addressSetManager.EnsureClusterNodeIPsAddressSet(addresssetmanager.ClusterNodeIPsEgressIPBackRef); err != nil {
+			return fmt.Errorf("failed to ensure cluster node IP address set for EgressIP: %w", err)
+		}
+	}
 	err = ensureDefaultNoRerouteNodePolicies(e.nbClient, e.addressSetFactory, ni.GetNetworkName(), routerName,
-		e.controllerName, listers.NewNodeLister(e.watchFactory.NodeInformer().GetIndexer()), e.v4, e.v6)
+		e.controllerName, listers.NewNodeLister(e.watchFactory.NodeInformer().GetIndexer()), e.v4, e.v6, syncNodeIPsAddressSet)
 	if err != nil {
 		return fmt.Errorf("failed to ensure no reroute node policies for network %s: %v", ni.GetNetworkName(), err)
 	}
@@ -3823,10 +3839,16 @@ func (e *EgressIPController) ensureDefaultNoRerouteNodePolicies() error {
 	e.nodeUpdateMutex.Lock()
 	defer e.nodeUpdateMutex.Unlock()
 	nodeLister := listers.NewNodeLister(e.watchFactory.NodeInformer().GetIndexer())
+	syncNodeIPsAddressSet := e.addressSetManager == nil
+	if e.addressSetManager != nil {
+		if err := e.addressSetManager.EnsureClusterNodeIPsAddressSet(addresssetmanager.ClusterNodeIPsEgressIPBackRef); err != nil {
+			return fmt.Errorf("failed to ensure cluster node IP address set for EgressIP: %w", err)
+		}
+	}
 	// ensure default network is processed
 	defaultNetInfo := e.networkManager.GetNetwork(types.DefaultNetworkName)
 	err := ensureDefaultNoRerouteNodePolicies(e.nbClient, e.addressSetFactory, defaultNetInfo.GetNetworkName(), defaultNetInfo.GetNetworkScopedClusterRouterName(),
-		e.controllerName, nodeLister, e.v4, e.v6)
+		e.controllerName, nodeLister, e.v4, e.v6, syncNodeIPsAddressSet)
 	if err != nil {
 		return fmt.Errorf("failed to ensure default no reroute policies for nodes for default network: %v", err)
 	}
@@ -3842,7 +3864,7 @@ func (e *EgressIPController) ensureDefaultNoRerouteNodePolicies() error {
 			return err
 		}
 		err = ensureDefaultNoRerouteNodePolicies(e.nbClient, e.addressSetFactory, network.GetNetworkName(), routerName,
-			e.controllerName, nodeLister, e.v4, e.v6)
+			e.controllerName, nodeLister, e.v4, e.v6, syncNodeIPsAddressSet)
 		if err != nil {
 			return fmt.Errorf("failed to ensure default no reroute policies for nodes for network %s: %v", network.GetNetworkName(), err)
 		}
@@ -3857,11 +3879,10 @@ func (e *EgressIPController) ensureDefaultNoRerouteNodePolicies() error {
 // i.e: ensuring that an egress pod can still communicate with a hostNetwork pod / service backed by hostNetwork pods
 // without using egressIPs.
 // sample: 101 ip4.src == $a12749576804119081385 && ip4.dst == $a11079093880111560446 allow pkt_mark=1008
-// All the cluster node's addresses are considered. This is to avoid race conditions after a VIP moves from one node
-// to another where we might process events out of order. For the same reason this function needs to be called under
-// lock.
+// All node addresses are listed here to decide which IP family policies are required. The shared cluster node IP
+// address set contents are owned by AddressSetManager when the caller is registered with it.
 func ensureDefaultNoRerouteNodePolicies(nbClient libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory,
-	network, router, controller string, nodeLister listers.NodeLister, v4, v6 bool) error {
+	network, router, controller string, nodeLister listers.NodeLister, v4, v6 bool, syncNodeIPsAddressSet bool) error {
 	nodes, err := nodeLister.List(labels.Everything())
 	if err != nil {
 		return fmt.Errorf("failed to list nodes: %v", err)
@@ -3870,19 +3891,20 @@ func ensureDefaultNoRerouteNodePolicies(nbClient libovsdbclient.Client, addressS
 	if err != nil {
 		return fmt.Errorf("failed to get node addresses: %v", err)
 	}
-	allAddresses := make([]net.IP, 0, len(v4NodeAddrs)+len(v6NodeAddrs))
-	allAddresses = append(allAddresses, v4NodeAddrs...)
-	allAddresses = append(allAddresses, v6NodeAddrs...)
 
-	var as addressset.AddressSet
 	// all networks reference the same node IP address set
-	dbIDs := getEgressIPAddrSetDbIDs(NodeIPAddrSetName, types.DefaultNetworkName, types.DefaultNetworkControllerName)
-	if as, err = addressSetFactory.GetAddressSet(dbIDs); err != nil {
+	dbIDs := addresssetmanager.GetClusterNodeIPsAddrSetDbIDs()
+	as, err := addressSetFactory.GetAddressSet(dbIDs)
+	if err != nil {
 		return fmt.Errorf("cannot ensure that addressSet %s exists %v", NodeIPAddrSetName, err)
 	}
-
-	if err = as.SetAddresses(util.StringSlice(allAddresses)); err != nil {
-		return fmt.Errorf("unable to set IPs to no re-route address set %s: %w", NodeIPAddrSetName, err)
+	if syncNodeIPsAddressSet {
+		allAddresses := make([]net.IP, 0, len(v4NodeAddrs)+len(v6NodeAddrs))
+		allAddresses = append(allAddresses, v4NodeAddrs...)
+		allAddresses = append(allAddresses, v6NodeAddrs...)
+		if err = as.SetAddresses(util.StringSlice(allAddresses)); err != nil {
+			return fmt.Errorf("unable to set IPs to no re-route address set %s: %w", NodeIPAddrSetName, err)
+		}
 	}
 
 	ipv4ClusterNodeIPAS, ipv6ClusterNodeIPAS := as.GetASHashNames()

@@ -447,7 +447,10 @@ func (oc *DefaultNetworkController) InitEgressServiceZoneController() (*egresssv
 
 	if !config.OVNKubernetesFeature.EnableEgressIP {
 		initClusterEgressPolicies = InitClusterEgressPolicies
-		ensureNodeNoReroutePolicies = ensureDefaultNoRerouteNodePolicies
+		ensureNodeNoReroutePolicies = func(nbClient libovsdbclient.Client, addressSetFactory addressset.AddressSetFactory,
+			network, router, controller string, nodeLister listers.NodeLister, v4, v6 bool) error {
+			return ensureDefaultNoRerouteNodePolicies(nbClient, addressSetFactory, network, router, controller, nodeLister, v4, v6, true)
+		}
 		createDefaultNodeRouteToExternal = libovsdbutil.CreateDefaultRouteToExternal
 	}
 

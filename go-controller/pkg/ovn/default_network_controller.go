@@ -658,6 +658,10 @@ func (oc *DefaultNetworkController) run(_ context.Context) error {
 		return err
 	}
 
+	if err := oc.registerClusterNodeIPsAddressSetUsers(); err != nil {
+		return err
+	}
+
 	// Node reconciliation must be started next because it creates the node switch
 	// which most other watches depend on.
 	// https://github.com/ovn-kubernetes/ovn-kubernetes/pull/859
@@ -846,6 +850,31 @@ func (oc *DefaultNetworkController) run(_ context.Context) error {
 	metrics.RunOVNKubeFeatureDBObjectsMetricsUpdater(oc.nbClient, oc.controllerName, 30*time.Second, oc.stopChan)
 
 	return nil
+}
+
+func (oc *DefaultNetworkController) registerClusterNodeIPsAddressSetUsers() error {
+	if oc.addressSetManager == nil {
+		return nil
+	}
+
+	var errs []error
+	if config.OVNKubernetesFeature.EnableEgressIP {
+		if err := oc.addressSetManager.EnsureClusterNodeIPsAddressSet(addresssetmanager.ClusterNodeIPsEgressIPBackRef); err != nil {
+			errs = append(errs, fmt.Errorf("failed to ensure cluster node IP address set for EgressIP: %w", err))
+		}
+	}
+	if config.OVNKubernetesFeature.EnableEgressService {
+		if err := oc.addressSetManager.EnsureClusterNodeIPsAddressSet(addresssetmanager.ClusterNodeIPsEgressServiceBackRef); err != nil {
+			errs = append(errs, fmt.Errorf("failed to ensure cluster node IP address set for EgressService: %w", err))
+		}
+	}
+	if config.OVNKubernetesFeature.EnableRouteAdvertisements {
+		if err := oc.addressSetManager.EnsureClusterNodeIPsAddressSet(addresssetmanager.ClusterNodeIPsRouteAdvertisementsBackRef); err != nil {
+			errs = append(errs, fmt.Errorf("failed to ensure cluster node IP address set for route advertisements: %w", err))
+		}
+	}
+
+	return utilerrors.Join(errs...)
 }
 
 func (oc *DefaultNetworkController) Reconcile(netInfo util.NetInfo) error {
