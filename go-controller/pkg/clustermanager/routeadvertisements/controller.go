@@ -56,6 +56,10 @@ const (
 	fieldManager = "clustermanager-routeadvertisements-controller"
 	// evpnRawConfigPriority is set to an arbitrary value that still allows users to override EVPN config if needed.
 	evpnRawConfigPriority = 10
+	// dpuHostNextHopRawConfigPriority ensures the next-hop route-map updates
+	// are applied after frr-k8s renders route maps from the typed API.
+	dpuHostNextHopRawConfigPriority = evpnRawConfigPriority + 1
+	dpuHostNodeLabel                = "k8s.ovn.org/dpu-host"
 )
 
 var (
@@ -766,6 +770,20 @@ func (c *Controller) generateFRRConfiguration(
 	frrRouterVRFs sets.Set[string],
 ) (*frrtypes.FRRConfiguration, error) {
 	var routers []frrtypes.Router
+	var dpuHostNextHopRaw strings.Builder
+	dpuHostNextHopRouteMaps := sets.New[string]()
+	var node *corev1.Node
+	getNode := func() (*corev1.Node, error) {
+		if node != nil {
+			return node, nil
+		}
+		var err error
+		node, err = c.nodeLister.Get(nodeName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get node %s: %w", nodeName, err)
+		}
+		return node, nil
+	}
 
 	// go over the source routers
 	for i, router := range source.Spec.BGP.Routers {
@@ -829,9 +847,9 @@ func (c *Controller) generateFRRConfiguration(
 		// to exclude the node itself from its own neighbor list to avoid
 		// self-peering. Look up the node's primary interface addresses so
 		// we can filter them out below.
-		node, err := c.nodeLister.Get(nodeName)
+		node, err := getNode()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get node %s: %w", nodeName, err)
+			return nil, err
 		}
 		nodeIfAddr, err := util.GetNodeIfAddrAnnotation(node)
 		if err != nil {
@@ -840,6 +858,11 @@ func (c *Controller) generateFRRConfiguration(
 		// Strip CIDR mask to get bare IP strings for neighbor comparison.
 		nodeV4, _, _ := strings.Cut(nodeIfAddr.IPv4, "/")
 		nodeV6, _, _ := strings.Cut(nodeIfAddr.IPv6, "/")
+
+		dpuHostGatewayNextHops, err := getDPUHostGatewayNextHops(node, len(allNoOverlayPodSubnets) > 0)
+		if err != nil {
+			return nil, err
+		}
 
 		targetRouter.Neighbors = make([]frrtypes.Neighbor, 0, len(source.Spec.BGP.Routers[i].Neighbors))
 		for _, neighbor := range source.Spec.BGP.Routers[i].Neighbors {
@@ -876,6 +899,13 @@ func (c *Controller) generateFRRConfiguration(
 					Mode:     frrtypes.AllowRestricted,
 					Prefixes: advertisePrefixes,
 				},
+			}
+			if nextHop := dpuHostGatewayNextHops[isIPV6]; nextHop != "" {
+				routeMapKey := fmt.Sprintf("%s/%t", neighbor.Address, isIPV6)
+				if !dpuHostNextHopRouteMaps.Has(routeMapKey) {
+					appendDPUHostNextHopRawConfig(&dpuHostNextHopRaw, neighbor.Address, isIPV6, nextHop)
+					dpuHostNextHopRouteMaps.Insert(routeMapKey)
+				}
 			}
 
 			// For no-overlay networks, add routes to pod subnets to the accepted routes list
@@ -1129,20 +1159,90 @@ func (c *Controller) generateFRRConfiguration(
 			"kubernetes.io/hostname": nodeName,
 		},
 	}
+	new.Spec.Raw = appendRawConfig(new.Spec.Raw, dpuHostNextHopRawConfigPriority, dpuHostNextHopRaw.String())
 
 	// Generate EVPN raw config for the EVPN-specific parts.
 	// TODO: once frr-k8s provides a typed EVPN API, we can use that instead of raw config
 	if len(selectedNetworks.macVRFConfigs) > 0 || len(selectedNetworks.ipVRFConfigs) > 0 {
 		rawConfig := generateEVPNRawConfig(selectedNetworks, globalRouterASN, neighbors, vrfASNs)
 		if rawConfig != "" {
-			new.Spec.Raw = frrtypes.RawConfig{
-				Priority: evpnRawConfigPriority,
-				Config:   rawConfig,
-			}
+			new.Spec.Raw = appendRawConfig(new.Spec.Raw, evpnRawConfigPriority, rawConfig)
 		}
 	}
 
 	return new, nil
+}
+
+func getDPUHostGatewayNextHops(node *corev1.Node, noOverlay bool) (map[bool]string, error) {
+	if !noOverlay {
+		return nil, nil
+	}
+	if _, ok := node.Labels[dpuHostNodeLabel]; !ok {
+		return nil, nil
+	}
+
+	if _, err := util.ParseNodeChassisIDAnnotation(node); err != nil {
+		if util.IsAnnotationNotSetError(err) {
+			return nil, fmt.Errorf("%w: waiting for chassis ID annotation to be set for DPU host node %q: %w",
+				errPending, node.Name, err)
+		}
+		return nil, fmt.Errorf("%w: failed to parse chassis ID annotation for DPU host node %q: %w",
+			errConfig, node.Name, err)
+	}
+
+	gatewayConfig, err := util.ParseNodeL3GatewayAnnotation(node)
+	if err != nil {
+		if util.IsAnnotationNotSetError(err) {
+			return nil, fmt.Errorf("%w: waiting for L3 gateway annotation to be set for DPU host node %q: %w",
+				errPending, node.Name, err)
+		}
+		return nil, fmt.Errorf("%w: failed to parse L3 gateway annotation for DPU host node %q: %w",
+			errConfig, node.Name, err)
+	}
+	if gatewayConfig.Mode != config.GatewayModeShared {
+		return nil, nil
+	}
+
+	nextHops := map[bool]string{}
+	for _, ipNet := range gatewayConfig.IPAddresses {
+		if ipNet == nil || ipNet.IP == nil {
+			continue
+		}
+		nextHops[ipNet.IP.To4() == nil] = ipNet.IP.String()
+	}
+	if len(nextHops) == 0 {
+		return nil, fmt.Errorf("%w: no shared gateway IP addresses found for DPU host node %q", errConfig, node.Name)
+	}
+	return nextHops, nil
+}
+
+func appendDPUHostNextHopRawConfig(rawConfig *strings.Builder, neighborAddress string, isIPv6 bool, nextHop string) {
+	if rawConfig.Len() > 0 {
+		rawConfig.WriteByte('\n')
+	}
+	fmt.Fprintf(rawConfig, "route-map %s-out permit 1\n", neighborAddress)
+	if isIPv6 {
+		fmt.Fprintf(rawConfig, " set ipv6 next-hop global %s\n", nextHop)
+	} else {
+		fmt.Fprintf(rawConfig, " set ip next-hop %s\n", nextHop)
+	}
+	rawConfig.WriteString("exit\n")
+}
+
+func appendRawConfig(raw frrtypes.RawConfig, priority int, config string) frrtypes.RawConfig {
+	config = strings.TrimRight(config, "\n")
+	if config == "" {
+		return raw
+	}
+	if raw.Config == "" {
+		raw.Config = config + "\n"
+	} else {
+		raw.Config = strings.TrimRight(raw.Config, "\n") + "\n" + config + "\n"
+	}
+	if raw.Priority < priority {
+		raw.Priority = priority
+	}
+	return raw
 }
 
 // vtepCIDRPrefixSelectors converts VTEP CIDRs into FRR PrefixSelectors that
@@ -1547,6 +1647,8 @@ func nodeNeedsUpdate(oldObj, newObj *corev1.Node) bool {
 		!reflect.DeepEqual(oldObj.Labels, newObj.Labels) ||
 		util.NodeSubnetAnnotationChanged(oldObj, newObj) ||
 		oldObj.Annotations[util.OvnNodeIfAddr] != newObj.Annotations[util.OvnNodeIfAddr] ||
+		util.NodeL3GatewayAnnotationChanged(oldObj, newObj) ||
+		util.NodeChassisIDAnnotationChanged(oldObj, newObj) ||
 		util.NodeVTEPsAnnotationChanged(oldObj, newObj)
 }
 
