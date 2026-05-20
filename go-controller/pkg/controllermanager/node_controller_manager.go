@@ -227,7 +227,6 @@ func (ncm *NodeControllerManager) CleanupStaleNetworks(validNetworks ...util.Net
 		errs = append(errs, err)
 	}
 
-	// in DPU mode, vrfManager would be nil
 	if ncm.vrfManager != nil {
 		validVRFDevices := make(sets.Set[string])
 		for _, network := range validNetworks {
@@ -299,8 +298,10 @@ func NewNodeControllerManager(ovnClient *util.OVNClientset, wf factory.NodeWatch
 		}
 	}
 
-	if util.IsNetworkSegmentationSupportEnabled() && config.OvnKubeNode.Mode != ovntypes.NodeModeDPU {
+	if util.IsNetworkSegmentationSupportEnabled() {
 		ncm.vrfManager = vrfmanager.NewController(ncm.routeManager)
+	}
+	if util.IsNetworkSegmentationSupportEnabled() && config.OvnKubeNode.Mode != ovntypes.NodeModeDPU {
 		ncm.ruleManager = iprulemanager.NewController(config.IPv4Mode, config.IPv6Mode)
 	}
 
