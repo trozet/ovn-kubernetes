@@ -1318,6 +1318,9 @@ deploy_frr_external_container() {
     ./demo.sh
   fi
   popd || exit 1
+
+  connect_frr_to_dpu_gateway_network
+
   if  [ "$PLATFORM_IPV6_SUPPORT" == true ]; then
     # Enable IPv6 forwarding in FRR
     $OCI_BIN exec frr sysctl -w net.ipv6.conf.all.forwarding=1
@@ -1356,6 +1359,33 @@ deploy_frr_external_container() {
     $OCI_BIN exec frr vtysh "${vtysh_cmds[@]}"
     echo "Global EVPN BGP config complete on external FRR"
   fi
+}
+
+connect_frr_to_dpu_gateway_network() {
+  if [ "${DPU_MODE:-none}" != "dpu" ]; then
+    return
+  fi
+
+  local network_name="${DPU_SIM_GATEWAY_NETWORK:-dpu-sim-gateway}"
+  if ! $OCI_BIN network inspect "${network_name}" >/dev/null 2>&1; then
+    echo "DPU gateway network ${network_name} does not exist; skipping FRR attach"
+    return
+  fi
+
+  local network_mode
+  network_mode=$($OCI_BIN inspect -f '{{.HostConfig.NetworkMode}}' frr)
+  if [ "${network_mode}" = "host" ]; then
+    echo "FRR uses host networking; host routes provide DPU gateway access"
+    return
+  fi
+
+  if $OCI_BIN inspect -f '{{json .NetworkSettings.Networks}}' frr | \
+      jq -e --arg net "${network_name}" 'has($net)' >/dev/null; then
+    return
+  fi
+
+  echo "Connecting FRR external container to DPU gateway network ${network_name}"
+  $OCI_BIN network connect "${network_name}" frr
 }
 
 deploy_bgp_external_server() {
