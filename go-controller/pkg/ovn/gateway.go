@@ -1612,6 +1612,13 @@ func (gw *GatewayManager) SyncGateway(
 	if gw.clusterRouterName == "" {
 		routerName = gw.gwRouterName
 	}
+	var dpuKAPIHostCIDRs []string
+	if config.IsModeDPU() && config.Gateway.Mode == config.GatewayModeShared {
+		dpuKAPIHostCIDRs, err = util.GetNodeHostCIDRsForSplitDPUKAPI(node, gwConfig.annoConfig.IPAddresses)
+		if err != nil {
+			return fmt.Errorf("failed to get split DPU host CIDRs for node %s network %q: %v", node.Name, gw.netInfo.GetNetworkName(), err)
+		}
+	}
 	for _, subnet := range gwConfig.hostSubnets {
 		mgmtIfAddr := gw.netInfo.GetNodeManagementIP(subnet)
 		if mgmtIfAddr == nil {
@@ -1626,7 +1633,7 @@ func (gw *GatewayManager) SyncGateway(
 			return fmt.Errorf("failed to extract the host IP addrs for network %q: %v", gw.netInfo.GetNetworkName(), err)
 		}
 		pbrMngr := gatewayrouter.NewPolicyBasedRoutesManager(gw.nbClient, routerName, gw.netInfo)
-		if err := pbrMngr.AddSameNodeIPPolicy(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
+		if err := pbrMngr.AddSameNodeIPPolicyWithHostCIDRs(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs, dpuKAPIHostCIDRs); err != nil {
 			return fmt.Errorf("failed to configure the policy based routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
 		}
 		if gw.netInfo.TopologyType() == types.Layer2Topology && gw.transitRouterInfo == nil && config.Gateway.Mode == config.GatewayModeLocal {

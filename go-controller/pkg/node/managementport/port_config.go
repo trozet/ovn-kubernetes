@@ -19,6 +19,7 @@ import (
 
 type managementPortConfig struct {
 	nodeName    string
+	node        *corev1.Node
 	hostSubnets []*net.IPNet
 
 	mpMAC net.HardwareAddr
@@ -57,6 +58,7 @@ func newManagementPortConfig(node *corev1.Node, hostSubnets []*net.IPNet, netInf
 
 	mpcfg := &managementPortConfig{
 		nodeName:    nodeName,
+		node:        node,
 		hostSubnets: hostSubnets,
 		mpMAC:       mpMAC,
 		netInfo:     netInfo,

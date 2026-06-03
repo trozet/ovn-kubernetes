@@ -396,4 +396,12 @@ const (
 	// management port.
 	NFTMgmtPortNoSNATSubnetsV4 = "mgmtport-no-snat-subnets-v4"
 	NFTMgmtPortNoSNATSubnetsV6 = "mgmtport-no-snat-subnets-v6"
+
+	// DPU host mode needs to masquerade pod traffic that is routed through
+	// management ports toward host CIDRs that are not on the gateway subnet.
+	NFTDPUHostKAPIMgmtPorts  = "dpu-host-kapi-mgmt-ports"
+	NFTDPUHostKAPICIDRsV4    = "dpu-host-kapi-cidrs-v4"
+	NFTDPUHostKAPICIDRsV6    = "dpu-host-kapi-cidrs-v6"
+	NFTDPUHostKAPIPodCIDRsV4 = "dpu-host-kapi-pod-cidrs-v4"
+	NFTDPUHostKAPIPodCIDRsV6 = "dpu-host-kapi-pod-cidrs-v6"
 )

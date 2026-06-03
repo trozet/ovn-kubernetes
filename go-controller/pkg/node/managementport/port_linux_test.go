@@ -879,6 +879,36 @@ var _ = Describe("Management Port tests", func() {
 				err = nodenft.MatchNFTRules(finalExpectedNFT, nft.Dump())
 				Expect(err).NotTo(HaveOccurred())
 			})
+
+			It("adds DPU host kube API masquerade rules", func() {
+				config.OvnKubeNode.Mode = types.NodeModeDPUHost
+				config.Gateway.Mode = config.GatewayModeShared
+
+				nft := nodenft.SetFakeNFTablesHelper()
+				node := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node1",
+						Annotations: map[string]string{
+							util.OVNNodeHostCIDRs:       `["172.18.0.4/16","172.30.0.253/24"]`,
+							util.OvnNodeChassisID:       "chassis-id",
+							util.OvnNodeL3GatewayConfig: `{"default":{"mode":"shared","mac-address":"0a:58:ac:1e:00:fd","ip-address":"172.30.0.253/24","next-hop":"172.30.0.1"}}`,
+						},
+					},
+				}
+
+				Expect(setupDPUHostKubeAPISNATRules(node, types.K8sMgmtIntfName, ovntest.MustParseIPNets("10.244.1.0/24"))).To(Succeed())
+
+				dump := nft.Dump()
+				Expect(dump).To(ContainSubstring("add set inet ovn-kubernetes dpu-host-kapi-mgmt-ports { type ifname ; }"))
+				Expect(dump).To(ContainSubstring("add set inet ovn-kubernetes dpu-host-kapi-cidrs-v4 { type ipv4_addr ; flags interval ; }"))
+				Expect(dump).To(ContainSubstring("add set inet ovn-kubernetes dpu-host-kapi-pod-cidrs-v4 { type ipv4_addr ; flags interval ; }"))
+				Expect(dump).To(ContainSubstring("add chain inet ovn-kubernetes dpu-host-kapi-snat { type nat hook postrouting priority 100 ; comment \"OVN DPU host kube API SNAT\" ; }"))
+				Expect(dump).To(ContainSubstring("add rule inet ovn-kubernetes dpu-host-kapi-snat iifname @dpu-host-kapi-mgmt-ports ip saddr @dpu-host-kapi-pod-cidrs-v4 ip daddr @dpu-host-kapi-cidrs-v4 masquerade"))
+				Expect(dump).To(ContainSubstring("add element inet ovn-kubernetes dpu-host-kapi-mgmt-ports { ovn-k8s-mp0 }"))
+				Expect(dump).To(ContainSubstring("add element inet ovn-kubernetes dpu-host-kapi-cidrs-v4 { 172.18.0.0/16 }"))
+				Expect(dump).NotTo(ContainSubstring("add element inet ovn-kubernetes dpu-host-kapi-cidrs-v4 { 172.30.0.0/24 }"))
+				Expect(dump).To(ContainSubstring("add element inet ovn-kubernetes dpu-host-kapi-pod-cidrs-v4 { 10.244.1.0/24 }"))
+			})
 		})
 	})
 

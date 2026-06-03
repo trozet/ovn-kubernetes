@@ -36,6 +36,10 @@ func NewPolicyBasedRoutesManager(nbClient client.Client, clusterRouterName strin
 }
 
 func (pbr *PolicyBasedRoutesManager) AddSameNodeIPPolicy(nodeName, mgmtPortIP string, hostIfCIDR *net.IPNet, otherHostAddrs []string) error {
+	return pbr.AddSameNodeIPPolicyWithHostCIDRs(nodeName, mgmtPortIP, hostIfCIDR, otherHostAddrs, nil)
+}
+
+func (pbr *PolicyBasedRoutesManager) AddSameNodeIPPolicyWithHostCIDRs(nodeName, mgmtPortIP string, hostIfCIDR *net.IPNet, otherHostAddrs []string, hostCIDRs []string) error {
 	if hostIfCIDR == nil {
 		return fmt.Errorf("<nil> host interface CIDR")
 	}
@@ -55,6 +59,18 @@ func (pbr *PolicyBasedRoutesManager) AddSameNodeIPPolicy(nodeName, mgmtPortIP st
 		// logical router policy doesn't support external_ids to stash metadata
 		networkScopedSwitchName := pbr.netInfo.GetNetworkScopedSwitchName(nodeName)
 		matchStr := generateNodeIPMatch(networkScopedSwitchName, l3Prefix, hostIP)
+		matches = matches.Insert(matchStr)
+	}
+	for _, hostCIDRString := range hostCIDRs {
+		_, hostCIDR, err := net.ParseCIDR(hostCIDRString)
+		if err != nil {
+			return fmt.Errorf("invalid host CIDR %q: %v", hostCIDRString, err)
+		}
+		if utilnet.IsIPv6CIDR(hostCIDR) != utilnet.IsIPv6String(mgmtPortIP) {
+			continue
+		}
+		networkScopedSwitchName := pbr.netInfo.GetNetworkScopedSwitchName(nodeName)
+		matchStr := generateNodeIPMatch(networkScopedSwitchName, getIPCIDRPrefix(hostCIDR), hostCIDR.String())
 		matches = matches.Insert(matchStr)
 	}
 

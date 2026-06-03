@@ -95,6 +95,8 @@ jobs:
             --kubeconfig kubeconfig/dpu-sim-host.kubeconfig --timeout=25m
           kubectl wait --for=condition=Ready nodes --all \
             --kubeconfig kubeconfig/dpu-sim-dpu.kubeconfig --timeout=25m
+          kubectl rollout status deployment/coredns -n kube-system \
+            --kubeconfig kubeconfig/dpu-sim-host.kubeconfig --timeout=5m
 
       - name: TFT Python venv
         working-directory: dpu-simulator

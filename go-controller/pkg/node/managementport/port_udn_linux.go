@@ -9,6 +9,7 @@ import (
 
 	v1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
+	corev1 "k8s.io/api/core/v1"
 	listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 
@@ -30,11 +31,12 @@ type UDNManagementPortController struct {
 type udnManagementPortConfig struct {
 	util.NetInfo
 	nodeName string
+	node     *corev1.Node
 	subnets  []*net.IPNet
 	mpMAC    net.HardwareAddr
 }
 
-func newUDNManagementPortConfig(nodeName string, networkLocalSubnets []*net.IPNet, netInfo util.NetInfo) (*udnManagementPortConfig, error) {
+func newUDNManagementPortConfig(node *corev1.Node, networkLocalSubnets []*net.IPNet, netInfo util.NetInfo) (*udnManagementPortConfig, error) {
 	if len(networkLocalSubnets) == 0 {
 		return nil, fmt.Errorf("cannot determine subnets while configuring management port for network: %s", netInfo.GetNetworkName())
 	}
@@ -42,7 +44,8 @@ func newUDNManagementPortConfig(nodeName string, networkLocalSubnets []*net.IPNe
 	return &udnManagementPortConfig{
 		NetInfo:  netInfo,
 		subnets:  networkLocalSubnets,
-		nodeName: nodeName,
+		nodeName: node.Name,
+		node:     node,
 		mpMAC:    util.IPAddrToHWAddr(netInfo.GetNodeManagementIP(networkLocalSubnets[0]).IP),
 	}, nil
 }
@@ -78,14 +81,13 @@ func NewUDNManagementPortController(
 
 	mgmtIfName := util.GetNetworkScopedK8sMgmtHostIntfName(uint(netInfo.GetNetworkID()))
 
-	cfg, err := newUDNManagementPortConfig(nodeName, networkLocalSubnets, netInfo)
-	if err != nil {
-		return nil, err
-	}
-
 	node, err := nodeLister.Get(nodeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node %s: %v", nodeName, err)
+	}
+	cfg, err := newUDNManagementPortConfig(node, networkLocalSubnets, netInfo)
+	if err != nil {
+		return nil, err
 	}
 	mpdevs, err := util.ParseNodeManagementPortAnnotation(node)
 	if err != nil {
@@ -375,10 +377,14 @@ func (mp *udnManagementPortNetdev) create() error {
 	if err = util.SetRPFilterLooseModeForInterface(mp.ifName); err != nil {
 		return err
 	}
-	return err
+	return setupDPUHostKubeAPISNATRules(mp.node, mp.ifName, mp.subnets)
 }
 
 func (mp *udnManagementPortNetdev) delete() error {
+	if err := deleteDPUHostKubeAPISNATRules(mp.ifName, mp.subnets); err != nil {
+		return err
+	}
+
 	link, err := util.GetNetLinkOps().LinkByName(mp.ifName)
 	if err != nil {
 		klog.Warningf("Failed to lookup management port interface %s for network %s: %v", mp.ifName, mp.GetNetworkName(), err)

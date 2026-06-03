@@ -27,6 +27,7 @@ type policy struct {
 	nodeName          string
 	hostInfCIDR       *net.IPNet // primary host interface CIDR
 	otherHostInfAddrs []string   // other addresses attached to primary host interface
+	hostCIDRs         []string   // host CIDRs that should be rerouted through the management port
 	targetNetwork     string     // network name
 }
 
@@ -107,6 +108,7 @@ func TestAddSameNodeIPPolicy(t *testing.T) {
 		node1Name                 = "node1"
 		node1HostIPv4Str          = "192.168.1.10"
 		node1HostCIDRIPv4Str      = node1HostIPv4Str + "/32"
+		node1SplitHostCIDRIPv4Str = "172.18.0.0/16"
 		node1HostOtherAddrIPv4Str = "172.18.0.5"
 		node1HostIPv6Str          = "fc00:f853:ccd:e793::3"
 		node1HostCIDR128IPv6Str   = node1HostIPv6Str + "/128"
@@ -205,6 +207,47 @@ func TestAddSameNodeIPPolicy(t *testing.T) {
 					UUID:     "node-ip2-lrp-uuid",
 					Priority: nodeSubNetPrio,
 					Match:    generateNodeIPMatch(cdnL3Network.info.GetNetworkScopedSwitchName(node1Name), v4Prefix, node1HostOtherAddrIPv4Str),
+					Action:   nbdb.LogicalRouterPolicyActionReroute,
+					Nexthops: []string{node1CDNMgntIPv4Str},
+				},
+			},
+		},
+		{
+			desc: "[cdn][ipv4] split DPU host CIDR",
+			addPolicies: []policy{
+				{
+					nodeName:          node1Name,
+					hostInfCIDR:       node1HostCIDRIPv4,
+					otherHostInfAddrs: otherHostAddrsIPv4,
+					hostCIDRs:         []string{node1SplitHostCIDRIPv4Str},
+					targetNetwork:     cdnL3Network.info.GetNetworkName(),
+				},
+			},
+			initialDB: networks{cdnL3Network},
+			expectedDB: []libovsdbtest.TestData{
+				&nbdb.LogicalRouter{
+					UUID:     "cdn-cr-uuid",
+					Name:     cdnL3Network.info.GetNetworkScopedClusterRouterName(),
+					Policies: []string{"node-ip-lrp-uuid", "node-ip2-lrp-uuid", "node-host-cidr-lrp-uuid"},
+				},
+				&nbdb.LogicalRouterPolicy{
+					UUID:     "node-ip-lrp-uuid",
+					Priority: nodeSubNetPrio,
+					Match:    generateNodeIPMatch(cdnL3Network.info.GetNetworkScopedSwitchName(node1Name), v4Prefix, node1HostIPv4Str),
+					Action:   nbdb.LogicalRouterPolicyActionReroute,
+					Nexthops: []string{node1CDNMgntIPv4Str},
+				},
+				&nbdb.LogicalRouterPolicy{
+					UUID:     "node-ip2-lrp-uuid",
+					Priority: nodeSubNetPrio,
+					Match:    generateNodeIPMatch(cdnL3Network.info.GetNetworkScopedSwitchName(node1Name), v4Prefix, node1HostOtherAddrIPv4Str),
+					Action:   nbdb.LogicalRouterPolicyActionReroute,
+					Nexthops: []string{node1CDNMgntIPv4Str},
+				},
+				&nbdb.LogicalRouterPolicy{
+					UUID:     "node-host-cidr-lrp-uuid",
+					Priority: nodeSubNetPrio,
+					Match:    generateNodeIPMatch(cdnL3Network.info.GetNetworkScopedSwitchName(node1Name), v4Prefix, node1SplitHostCIDRIPv4Str),
 					Action:   nbdb.LogicalRouterPolicyActionReroute,
 					Nexthops: []string{node1CDNMgntIPv4Str},
 				},
@@ -495,7 +538,7 @@ func TestAddSameNodeIPPolicy(t *testing.T) {
 				if utilnet.IsIPv6(p.hostInfCIDR.IP) {
 					mgntIP = targetNet.mgntIPv6
 				}
-				err = mgr.AddSameNodeIPPolicy(p.nodeName, mgntIP, p.hostInfCIDR, p.otherHostInfAddrs)
+				err = mgr.AddSameNodeIPPolicyWithHostCIDRs(p.nodeName, mgntIP, p.hostInfCIDR, p.otherHostInfAddrs, p.hostCIDRs)
 				if tt.expectErr && err == nil {
 					t.Fatalf("test: \"%s\", expected error but none occured", tt.desc)
 				}

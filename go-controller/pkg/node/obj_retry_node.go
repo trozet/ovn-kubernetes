@@ -186,6 +186,9 @@ func (h *nodeEventHandler) AddResource(obj interface{}, _ bool) error {
 						return fmt.Errorf("error updating no snat subnets sets: %w", err)
 					}
 				}
+				if err := managementport.SyncDPUHostKubeAPISNATHostCIDRs(node); err != nil {
+					return fmt.Errorf("error updating DPU host kube API SNAT CIDR sets: %w", err)
+				}
 
 				// Sync nftables sets for no-overlay SNAT exemption in LGW mode.
 				// In SGW mode, OVN address sets are used instead.
@@ -249,6 +252,11 @@ func (h *nodeEventHandler) UpdateResource(oldObj, newObj interface{}, _ bool) er
 					err := managementport.UpdateNoSNATSubnetsSets(newNode, util.ParseNodeDontSNATSubnetsList)
 					if err != nil {
 						return fmt.Errorf("error updating no snat subnets sets: %w", err)
+					}
+				}
+				if util.NodeHostCIDRsAnnotationChanged(oldNode, newNode) {
+					if err := managementport.SyncDPUHostKubeAPISNATHostCIDRs(newNode); err != nil {
+						return fmt.Errorf("error updating DPU host kube API SNAT CIDR sets: %w", err)
 					}
 				}
 

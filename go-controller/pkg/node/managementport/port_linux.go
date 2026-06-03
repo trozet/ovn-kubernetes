@@ -592,6 +592,9 @@ func createPlatformManagementPort(interfaceName string, cfg *managementPortConfi
 	if err := setupManagementPortNFTChain(interfaceName, cfg); err != nil {
 		return err
 	}
+	if err := setupDPUHostKubeAPISNATRules(cfg.node, interfaceName, cfg.hostSubnets); err != nil {
+		return err
+	}
 	DelLegacyMgtPortIptRules()
 
 	return nil
