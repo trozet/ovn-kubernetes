@@ -540,9 +540,6 @@ func setUpGatewayFakeOVSCommands(fexec *ovntest.FakeExec) {
 		Cmd:    "ovs-vsctl --timeout=15 --if-exists get interface breth0 ofport",
 		Output: "7",
 	})
-	fexec.AddFakeCmdsNoOutputNoError([]string{
-		"ovs-ofctl -O OpenFlow13 --bundle replace-flows breth0 -",
-	})
 }
 
 func setUpUDNOpenflowManagerFakeOVSCommands(fexec *ovntest.FakeExec) {

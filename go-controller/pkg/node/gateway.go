@@ -345,6 +345,7 @@ func (g *gateway) Start() error {
 			return fmt.Errorf("failed to update bridge flow cache: %w", err)
 		}
 		g.openflowManager.Run(g.stopChan, g.wg)
+		g.openflowManager.requestFlowSync()
 	}
 
 	if g.nodeIPManager != nil {

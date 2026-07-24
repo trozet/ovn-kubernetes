@@ -4,14 +4,56 @@
 package node
 
 import (
+	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/bridgeconfig"
-	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/openflow"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
+
+type fakeOpenFlowClient struct {
+	mutex     sync.Mutex
+	syncCalls []fakeOpenFlowSync
+	syncErr   error
+	closed    bool
+}
+
+func init() {
+	newOpenFlowClient = func(string) openflowClient {
+		return &fakeOpenFlowClient{}
+	}
+}
+
+type fakeOpenFlowSync struct {
+	bridge string
+	flows  []string
+	groups []string
+}
+
+func (f *fakeOpenFlowClient) SyncBridge(_ context.Context, bridge string, flows, groups []string) error {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	f.syncCalls = append(f.syncCalls, fakeOpenFlowSync{
+		bridge: bridge,
+		flows:  append([]string(nil), flows...),
+		groups: append([]string(nil), groups...),
+	})
+	return f.syncErr
+}
+
+func (f *fakeOpenFlowClient) ModifyPorts(context.Context, string, []openflow.PortModification) error {
+	return nil
+}
+
+func (f *fakeOpenFlowClient) Close() {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	f.closed = true
+}
 
 func TestOpenFlowManagerDeletesGroupCacheWithFlowCache(t *testing.T) {
 	ofm := &openflowManager{
@@ -34,27 +76,16 @@ func TestOpenFlowManagerDeletesGroupCacheWithFlowCache(t *testing.T) {
 }
 
 func TestOpenFlowManagerCleansUnusedUplinkBridgeFlows(t *testing.T) {
-	fexec := ovntest.NewFakeExec()
-	if err := util.SetExec(fexec); err != nil {
-		t.Fatalf("failed to set fake exec: %v", err)
-	}
-	t.Cleanup(util.ResetRunner)
-	fexec.AddFakeCmd(&ovntest.ExpectedCmd{
-		Cmd: "ovs-ofctl -O OpenFlow13 --bundle replace-flows breth0 -",
-	})
-	fexec.AddFakeCmd(&ovntest.ExpectedCmd{
-		Cmd: "ovs-ofctl -O OpenFlow13 del-groups breth0 group_id=100",
-	})
-
 	bridge := newOpenflowBridge(bridgeconfig.TestDefaultBridgeConfig())
 	bridge.updateFlowCacheEntry("stale", []string{"table=0,priority=100,actions=drop"})
 	bridge.updateGroupCacheEntry("stale", []string{"group_id=100,type=select,bucket=actions=drop"})
-	bridge.installedGroups = map[string]struct{}{"100": {}}
+	client := &fakeOpenFlowClient{}
 	ofm := &openflowManager{
 		defaultBridge: newOpenflowBridge(bridgeconfig.TestDefaultBridgeConfig()),
 		uplinkBridges: map[string]*openflowBridge{
 			"breth0": bridge,
 		},
+		openflowClient: client,
 	}
 
 	if err := ofm.delNetwork(&util.DefaultNetInfo{}, "breth0"); err != nil {
@@ -73,34 +104,31 @@ func TestOpenFlowManagerCleansUnusedUplinkBridgeFlows(t *testing.T) {
 	if groups := bridge.getGroupsByKey("stale"); groups != nil {
 		t.Fatalf("expected stale group cache entry to be deleted, got %#v", groups)
 	}
-	if len(bridge.installedGroups) != 0 {
-		t.Fatalf("expected stale installed groups to be deleted, got %#v", bridge.installedGroups)
-	}
 	if bridge.GetNetConfigLen() != 0 {
 		t.Fatalf("expected %s network config to be removed", types.DefaultNetworkName)
 	}
-	if !fexec.CalledMatchesExpected() {
-		t.Fatalf("expected cleanup to replace flows on the unused uplink bridge")
+	if len(client.syncCalls) != 1 || client.syncCalls[0].bridge != "breth0" {
+		t.Fatalf("expected cleanup to sync breth0 once, got %#v", client.syncCalls)
+	}
+	if len(client.syncCalls[0].flows) != 1 ||
+		client.syncCalls[0].flows[0] != "table=0,priority=0,actions=NORMAL\n" {
+		t.Fatalf("unexpected cleanup flows: %#v", client.syncCalls[0].flows)
+	}
+	if len(client.syncCalls[0].groups) != 0 {
+		t.Fatalf("unexpected cleanup groups: %#v", client.syncCalls[0].groups)
 	}
 }
 
 func TestOpenFlowManagerSyncsUplinkBridgeFlows(t *testing.T) {
-	fexec := ovntest.NewFakeExec()
-	if err := util.SetExec(fexec); err != nil {
-		t.Fatalf("failed to set fake exec: %v", err)
-	}
-	t.Cleanup(util.ResetRunner)
-	fexec.AddFakeCmd(&ovntest.ExpectedCmd{
-		Cmd: "ovs-ofctl -O OpenFlow13 --bundle replace-flows breth0 -",
-	})
-
 	ofBridge := newOpenflowBridge(bridgeconfig.TestDefaultBridgeConfig())
 	ofBridge.updateFlowCacheEntry("NORMAL", []string{"table=0,priority=0,actions=NORMAL"})
+	client := &fakeOpenFlowClient{}
 	ofm := &openflowManager{
 		defaultBridge: newOpenflowBridge(bridgeconfig.TestDefaultBridgeConfig()),
 		uplinkBridges: map[string]*openflowBridge{
 			"breth0": ofBridge,
 		},
+		openflowClient: client,
 	}
 
 	found, err := ofm.syncUplinkBridgeFlows("breth0")
@@ -110,15 +138,12 @@ func TestOpenFlowManagerSyncsUplinkBridgeFlows(t *testing.T) {
 	if !found {
 		t.Fatal("expected uplink bridge to be found")
 	}
-	if !fexec.CalledMatchesExpected() {
-		t.Fatal("expected uplink bridge flows to be replaced")
+	if len(client.syncCalls) != 1 || client.syncCalls[0].bridge != "breth0" {
+		t.Fatalf("expected uplink bridge flows to be synced, got %#v", client.syncCalls)
 	}
 
 	expectedErr := errors.New("failed to replace flows")
-	fexec.AddFakeCmd(&ovntest.ExpectedCmd{
-		Cmd: "ovs-ofctl -O OpenFlow13 --bundle replace-flows breth0 -",
-		Err: expectedErr,
-	})
+	client.syncErr = expectedErr
 	found, err = ofm.syncUplinkBridgeFlows("breth0")
 	if !found {
 		t.Fatal("expected uplink bridge to be found when flow sync fails")

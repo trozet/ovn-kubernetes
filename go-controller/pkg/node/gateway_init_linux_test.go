@@ -204,9 +204,6 @@ func shareGatewayInterfaceTest(app *cli.App, testNS ns.NetNS,
 			Cmd:    "sysctl -w net.ipv4.conf.ovn-k8s-mp0.rp_filter = 2",
 			Output: "net.ipv4.conf.ovn-k8s-mp0.rp_filter = 2",
 		})
-		fexec.AddFakeCmdsNoOutputNoError([]string{
-			"ovs-ofctl -O OpenFlow13 --bundle replace-flows breth0 -",
-		})
 		// nodePortWatcher()
 		fexec.AddFakeCmd(&ovntest.ExpectedCmd{
 			Cmd:    "ovs-vsctl --timeout=15 --if-exists get interface eth0 ofport",
@@ -667,10 +664,6 @@ func shareGatewayInterfaceDPUTest(app *cli.App, testNS ns.NetNS,
 		fexec.AddFakeCmd(&ovntest.ExpectedCmd{
 			Cmd:    "ovs-vsctl --timeout=15 get interface " + hostRep + " ofport",
 			Output: "9",
-		})
-		// cleanup flows
-		fexec.AddFakeCmdsNoOutputNoError([]string{
-			"ovs-ofctl -O OpenFlow13 --bundle replace-flows " + brphys + " -",
 		})
 		// nodePortWatcher()
 		fexec.AddFakeCmd(&ovntest.ExpectedCmd{
@@ -1141,9 +1134,6 @@ OFPT_GET_CONFIG_REPLY (xid=0x4): frags=normal miss_send_len=0`
 		fexec.AddFakeCmd(&ovntest.ExpectedCmd{
 			Cmd:    "ovs-ofctl show breth0",
 			Output: ovsOFOutput,
-		})
-		fexec.AddFakeCmdsNoOutputNoError([]string{
-			"ovs-ofctl -O OpenFlow13 --bundle replace-flows breth0 -",
 		})
 		fexec.AddFakeCmd(&ovntest.ExpectedCmd{
 			Cmd:    "ovs-ofctl show breth0",

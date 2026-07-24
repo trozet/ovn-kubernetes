@@ -1419,6 +1419,7 @@ func (nc *DefaultNodeNetworkController) addOrUpdateNode(node *corev1.Node) error
 
 	gw := nc.Gateway.(*gateway)
 	gw.openflowManager.updateBridgePMTUDFlowCache(getPMTUDKey(node.Name), addrs)
+	gw.openflowManager.requestFlowSync()
 
 	return nil
 }
@@ -1450,6 +1451,7 @@ func removePMTUDNodeNFTRules(nodeIPs []net.IP) error {
 func (nc *DefaultNodeNetworkController) deleteNode(node *corev1.Node) {
 	gw := nc.Gateway.(*gateway)
 	gw.openflowManager.deleteFlowsByKey(getPMTUDKey(node.Name))
+	gw.openflowManager.requestFlowSync()
 
 	// Use GetNodeAddresses to get node IPs
 	ipsv4, ipsv6, err := util.GetNodeAddresses(config.IPv4Mode, config.IPv6Mode, node)
