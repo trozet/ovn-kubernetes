@@ -5,6 +5,7 @@ go 1.26.0
 toolchain go1.26.3
 
 require (
+	antrea.io/libOpenflow v0.17.0
 	github.com/Microsoft/hcsshim v0.13.0
 	github.com/alexflint/go-filemutex v1.3.0
 	github.com/bhendo/go-powershell v0.0.0-20190719160123-219e7fb4e41e

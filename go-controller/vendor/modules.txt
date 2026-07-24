@@ -1,3 +1,9 @@
+# antrea.io/libOpenflow v0.17.0
+## explicit; go 1.24.0
+antrea.io/libOpenflow/common
+antrea.io/libOpenflow/openflow13
+antrea.io/libOpenflow/protocol
+antrea.io/libOpenflow/util
 # github.com/Masterminds/semver/v3 v3.4.0
 ## explicit; go 1.21
 github.com/Masterminds/semver/v3
