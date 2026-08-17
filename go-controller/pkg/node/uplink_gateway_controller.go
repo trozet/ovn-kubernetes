@@ -41,10 +41,12 @@ const (
 )
 
 type uplinkGatewayNetworkState struct {
-	generation uint64
-	phase      uplinkGatewayNetworkPhase
-	reason     string
-	message    string
+	generation    uint64
+	phase         uplinkGatewayNetworkPhase
+	reason        string
+	message       string
+	configuration string
+	lifecycle     uplinkGatewayNetworkLifecycle
 }
 
 type uplinkGatewayState struct {
@@ -52,6 +54,14 @@ type uplinkGatewayState struct {
 	conditionMutex sync.Mutex
 	networks       map[string]*uplinkGatewayNetworkState
 	lastCondition  *metav1.Condition
+	configuration  string
+	resolved       *resolvedUplinkGateway
+	invalidated    bool
+}
+
+type uplinkGatewayNetworkLifecycle interface {
+	reconcileUplinkGateway(*resolvedUplinkGateway) error
+	withdrawUplinkGateway() error
 }
 
 // UplinkGatewayController coordinates gateway programming and readiness for
@@ -112,6 +122,10 @@ func (c *UplinkGatewayController) SyncNetworks(networks ...util.NetInfo) error {
 		if c.uplinks[uplinkName] == nil {
 			c.uplinks[uplinkName] = &uplinkGatewayState{networks: map[string]*uplinkGatewayNetworkState{}}
 		}
+		if resolved, err := c.resolvedGateway(state); err == nil {
+			c.uplinks[uplinkName].configuration = resolvedUplinkGatewayConfiguration(resolved)
+			c.uplinks[uplinkName].resolved = resolved
+		}
 		affectedUplinks[uplinkName] = struct{}{}
 	}
 	for networkName, uplinkName := range c.uplinkByNetworkName {
@@ -130,7 +144,7 @@ func (c *UplinkGatewayController) SyncNetworks(networks ...util.NetInfo) error {
 
 	var errs []error
 	for _, uplinkName := range sortedMapKeys(affectedUplinks) {
-		if err := c.publishGatewayCondition(uplinkName); err != nil && !apierrors.IsNotFound(err) {
+		if err := c.publishGatewayCondition(uplinkName); err != nil && !isUplinkStateNotFound(err) {
 			errs = append(errs, err)
 		}
 	}
@@ -155,7 +169,7 @@ func (c *UplinkGatewayController) ReconcileNetwork(network util.NetInfo, reconci
 	}
 
 	uplinkState, generation, affectedUplinks := c.markNetworkPending(network)
-	if err := c.publishGatewayConditions(affectedUplinks); err != nil {
+	if err := c.publishGatewayConditions(affectedUplinks); err != nil && !isUplinkStateNotFound(err) {
 		return err
 	}
 
@@ -167,15 +181,124 @@ func (c *UplinkGatewayController) ReconcileNetwork(network util.NetInfo, reconci
 	return utilerrors.Join(reconcileErr, statusErr)
 }
 
+// ActivateNetwork registers the non-terminal Uplink lifecycle callbacks after
+// the network's initial gateway programming succeeds. If the Uplink was
+// invalidated concurrently, withdraw the just-created programming before
+// returning so the network manager retries against the next resolved state.
+func (c *UplinkGatewayController) ActivateNetwork(
+	network util.NetInfo,
+	lifecycle uplinkGatewayNetworkLifecycle,
+) error {
+	if network.Uplink() == "" {
+		return nil
+	}
+
+	c.mutex.Lock()
+	uplinkState := c.uplinks[network.Uplink()]
+	c.mutex.Unlock()
+	if uplinkState == nil {
+		return fmt.Errorf("missing gateway state for Uplink %s", network.Uplink())
+	}
+
+	uplinkState.operationMutex.Lock()
+	defer uplinkState.operationMutex.Unlock()
+
+	c.mutex.Lock()
+	if c.uplinks[network.Uplink()] != uplinkState {
+		c.mutex.Unlock()
+		return fmt.Errorf("gateway state for Uplink %s was replaced", network.Uplink())
+	}
+	networkState := uplinkState.networks[network.GetNetworkName()]
+	if networkState == nil {
+		c.mutex.Unlock()
+		return fmt.Errorf("missing gateway state for network %s", network.GetNetworkName())
+	}
+	networkState.lifecycle = lifecycle
+	invalidated := uplinkState.invalidated
+	configurationChanged := networkState.configuration != uplinkState.configuration
+	desiredConfiguration := uplinkState.configuration
+	resolved := uplinkState.resolved
+	c.mutex.Unlock()
+
+	if !invalidated && (!configurationChanged || resolved == nil) {
+		return nil
+	}
+
+	var reconcileErr error
+	if invalidated {
+		reconcileErr = lifecycle.withdrawUplinkGateway()
+	} else {
+		reconcileErr = lifecycle.reconcileUplinkGateway(resolved)
+	}
+	if reconcileErr != nil {
+		c.setNetworkFailure(
+			uplinkState,
+			network.GetNetworkName(),
+			uplinkGatewayFailureReason(reconcileErr),
+			reconcileErr,
+		)
+	} else if !invalidated {
+		c.setNetworkReady(
+			uplinkState,
+			network.GetNetworkName(),
+			desiredConfiguration,
+		)
+		if err := c.publishGatewayCondition(network.Uplink()); err != nil {
+			reconcileErr = err
+		}
+	}
+
+	if !invalidated && reconcileErr == nil {
+		return nil
+	}
+	if !invalidated {
+		cleanupErr := lifecycle.withdrawUplinkGateway()
+		if cleanupErr != nil {
+			reconcileErr = utilerrors.Join(
+				reconcileErr,
+				fmt.Errorf("failed to clean up gateway after activation failure: %w", cleanupErr),
+			)
+		}
+	}
+
+	// Start did not succeed, so this gateway object will not become the active
+	// network controller. Avoid retaining a callback to it across the retry.
+	c.mutex.Lock()
+	if current := c.uplinks[network.Uplink()]; current == uplinkState {
+		if currentNetwork := current.networks[network.GetNetworkName()]; currentNetwork != nil {
+			currentNetwork.lifecycle = nil
+		}
+	}
+	c.mutex.Unlock()
+	if reconcileErr != nil {
+		return reconcileErr
+	}
+	return fmt.Errorf("Uplink %s gateway state was invalidated during network startup", network.Uplink())
+}
+
 // DeleteNetwork serializes gateway cleanup and removes the network from the
 // aggregate desired set only after cleanup succeeds.
 func (c *UplinkGatewayController) DeleteNetwork(network util.NetInfo, reconcile func() error) error {
 	if network.Uplink() == "" {
 		return reconcile()
 	}
+	c.mutex.Lock()
+	uplinkState := c.uplinks[network.Uplink()]
+	trackedUplink := c.uplinkByNetworkName[network.GetNetworkName()]
+	trackedNetwork := false
+	if uplinkState != nil {
+		_, trackedNetwork = uplinkState.networks[network.GetNetworkName()]
+	}
+	c.mutex.Unlock()
+	if trackedUplink != network.Uplink() || !trackedNetwork {
+		// DeleteGatewayState may win the race with the final CUDN cleanup after
+		// the Uplink finalizer is released. Cleanup still has to run, but it
+		// must not recreate a cache entry for the deleted Uplink.
+		return reconcile()
+	}
 
 	uplinkState, generation, affectedUplinks := c.markNetworkPending(network)
-	if err := c.publishGatewayConditions(affectedUplinks); err != nil {
+	if err := c.publishGatewayConditions(affectedUplinks); err != nil && !isUplinkStateNotFound(err) {
 		return err
 	}
 
@@ -184,6 +307,9 @@ func (c *UplinkGatewayController) DeleteNetwork(network util.NetInfo, reconcile 
 	uplinkState.operationMutex.Unlock()
 
 	statusErr := c.completeNetworkDelete(network, generation, reconcileErr)
+	if isUplinkStateNotFound(statusErr) {
+		statusErr = nil
+	}
 	return utilerrors.Join(reconcileErr, statusErr)
 }
 
@@ -191,10 +317,13 @@ func (c *UplinkGatewayController) DeleteNetwork(network util.NetInfo, reconcile 
 // Uplink that still exists but no longer selects this node. Preserve the
 // active network set so aggregate readiness cannot become true until every
 // affected CUDN has reconciled again.
-func (c *UplinkGatewayController) InvalidateGatewayState(uplinkName string) {
+func (c *UplinkGatewayController) InvalidateGatewayState(uplinkName string) error {
 	c.mutex.Lock()
 	uplinkState := c.uplinks[uplinkName]
 	if uplinkState != nil {
+		uplinkState.invalidated = true
+		uplinkState.configuration = ""
+		uplinkState.resolved = nil
 		for _, networkState := range uplinkState.networks {
 			networkState.generation++
 			networkState.phase = uplinkGatewayNetworkPending
@@ -205,7 +334,7 @@ func (c *UplinkGatewayController) InvalidateGatewayState(uplinkName string) {
 	c.mutex.Unlock()
 
 	if uplinkState == nil {
-		return
+		return nil
 	}
 	// Wait for an already-started publish before clearing lastCondition. The
 	// caller deletes the UplinkState only after this method returns, so no old
@@ -213,6 +342,241 @@ func (c *UplinkGatewayController) InvalidateGatewayState(uplinkName string) {
 	uplinkState.conditionMutex.Lock()
 	uplinkState.lastCondition = nil
 	uplinkState.conditionMutex.Unlock()
+
+	var errs []error
+	if err := c.publishGatewayCondition(uplinkName); err != nil && !isUplinkStateNotFound(err) {
+		errs = append(errs, err)
+	}
+
+	uplinkState.operationMutex.Lock()
+	c.mutex.Lock()
+	lifecycles := make(map[string]uplinkGatewayNetworkLifecycle, len(uplinkState.networks))
+	if c.uplinks[uplinkName] == uplinkState {
+		for networkName, networkState := range uplinkState.networks {
+			if networkState.lifecycle != nil {
+				lifecycles[networkName] = networkState.lifecycle
+			}
+		}
+	}
+	c.mutex.Unlock()
+	for _, networkName := range sortedLifecycleKeys(lifecycles) {
+		if err := lifecycles[networkName].withdrawUplinkGateway(); err != nil {
+			c.setNetworkFailure(
+				uplinkState,
+				networkName,
+				uplinkv1alpha1.UplinkStateReasonGatewayProgrammingFailed,
+				err,
+			)
+			errs = append(errs, fmt.Errorf("failed to withdraw gateway for network %s: %w", networkName, err))
+		}
+	}
+	uplinkState.operationMutex.Unlock()
+
+	if err := c.publishGatewayCondition(uplinkName); err != nil && !isUplinkStateNotFound(err) {
+		errs = append(errs, err)
+	}
+	return utilerrors.Join(errs...)
+}
+
+// ReconcileGatewayState consumes discovery's freshly computed status. A
+// configuration equal to the active one is deletion recovery and only needs
+// its condition republished. A new lifecycle or changed configuration must
+// rebuild every registered gateway before GatewayReady can become true.
+func (c *UplinkGatewayController) ReconcileGatewayState(state *uplinkv1alpha1.UplinkState) error {
+	uplinkName, nodeName := uplinkutil.StateIdentity(state)
+	if uplinkName == "" || nodeName != c.nodeName {
+		return nil
+	}
+
+	resolved, err := c.resolvedGateway(state)
+	if err != nil {
+		invalidateErr := c.InvalidateGatewayState(uplinkName)
+		return utilerrors.Join(err, invalidateErr)
+	}
+	configuration := resolvedUplinkGatewayConfiguration(resolved)
+
+	c.mutex.Lock()
+	uplinkState := c.uplinks[uplinkName]
+	if uplinkState == nil {
+		uplinkState = &uplinkGatewayState{networks: map[string]*uplinkGatewayNetworkState{}}
+		c.uplinks[uplinkName] = uplinkState
+	}
+	if !uplinkState.invalidated && uplinkState.configuration == configuration {
+		c.mutex.Unlock()
+		return c.RepublishGatewayCondition(uplinkName)
+	}
+	uplinkState.invalidated = true
+	for _, networkState := range uplinkState.networks {
+		networkState.generation++
+		networkState.phase = uplinkGatewayNetworkPending
+		networkState.reason = uplinkv1alpha1.UplinkStateReasonGatewayConfigurationPending
+		networkState.message = "gateway reconciliation is pending"
+	}
+	c.mutex.Unlock()
+
+	// A changed configuration must not merge against readiness from the old
+	// programming while the new gateway is being installed.
+	uplinkState.conditionMutex.Lock()
+	uplinkState.lastCondition = nil
+	uplinkState.conditionMutex.Unlock()
+
+	var errs []error
+	if err := c.publishGatewayCondition(uplinkName); err != nil && !isUplinkStateNotFound(err) {
+		errs = append(errs, err)
+	}
+
+	uplinkState.operationMutex.Lock()
+	c.mutex.Lock()
+	lifecycles := make(map[string]uplinkGatewayNetworkLifecycle, len(uplinkState.networks))
+	if c.uplinks[uplinkName] == uplinkState {
+		for networkName, networkState := range uplinkState.networks {
+			if networkState.lifecycle != nil {
+				lifecycles[networkName] = networkState.lifecycle
+			}
+		}
+	}
+	c.mutex.Unlock()
+
+	programmingFailed := false
+	for _, networkName := range sortedLifecycleKeys(lifecycles) {
+		reconcileErr := lifecycles[networkName].reconcileUplinkGateway(resolved)
+		if reconcileErr == nil {
+			c.setNetworkReady(uplinkState, networkName, configuration)
+			continue
+		}
+		c.setNetworkFailure(
+			uplinkState,
+			networkName,
+			uplinkGatewayFailureReason(reconcileErr),
+			reconcileErr,
+		)
+		programmingFailed = true
+		errs = append(errs, fmt.Errorf("failed to reconcile gateway for network %s: %w", networkName, reconcileErr))
+	}
+
+	c.mutex.Lock()
+	if !programmingFailed && c.uplinks[uplinkName] == uplinkState {
+		uplinkState.configuration = configuration
+		uplinkState.resolved = resolved
+		uplinkState.invalidated = false
+	}
+	c.mutex.Unlock()
+	uplinkState.operationMutex.Unlock()
+
+	if statusErr := c.publishGatewayCondition(uplinkName); statusErr != nil {
+		errs = append(errs, statusErr)
+	}
+	return utilerrors.Join(errs...)
+}
+
+func (c *UplinkGatewayController) resolvedGateway(
+	state *uplinkv1alpha1.UplinkState,
+) (*resolvedUplinkGateway, error) {
+	conditionType := uplinkv1alpha1.UplinkStateConditionResolved
+	requireResolvedBridge := config.IsModeDPU() || config.IsModeFull()
+	if config.IsModeDPUHost() {
+		conditionType = uplinkv1alpha1.UplinkStateConditionHostDataReady
+	}
+	condition := meta.FindStatusCondition(state.Status.Conditions, conditionType)
+	if condition == nil || condition.Status != metav1.ConditionTrue {
+		return nil, fmt.Errorf("uplink state %s is not ready for gateway programming", state.Name)
+	}
+	uplinkName, nodeName := uplinkutil.StateIdentity(state)
+	return resolvedUplinkGatewayFromState(state, uplinkName, nodeName, requireResolvedBridge)
+}
+
+func resolvedUplinkGatewayConfiguration(resolved *resolvedUplinkGateway) string {
+	ipAddresses := make([]string, 0, len(resolved.ipAddresses))
+	for _, ipAddress := range resolved.ipAddresses {
+		ipAddresses = append(ipAddresses, ipAddress.String())
+	}
+	defaultGateways := make([]string, 0, len(resolved.defaultGateways))
+	for _, defaultGateway := range resolved.defaultGateways {
+		defaultGateways = append(defaultGateways, defaultGateway.String())
+	}
+	sort.Strings(ipAddresses)
+	sort.Strings(defaultGateways)
+	return strings.Join([]string{
+		resolved.hostInterfaceName,
+		resolved.bridgeName,
+		resolved.macAddress.String(),
+		strings.Join(ipAddresses, ","),
+		strings.Join(defaultGateways, ","),
+	}, "|")
+}
+
+func (c *UplinkGatewayController) setNetworkReady(
+	uplinkState *uplinkGatewayState,
+	networkName, configuration string,
+) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	for _, current := range c.uplinks {
+		if current != uplinkState {
+			continue
+		}
+		if networkState := current.networks[networkName]; networkState != nil {
+			networkState.phase = uplinkGatewayNetworkReady
+			networkState.reason = uplinkv1alpha1.UplinkStateReasonGatewayConfigured
+			networkState.message = ""
+			networkState.configuration = configuration
+		}
+		return
+	}
+}
+
+func (c *UplinkGatewayController) setNetworkFailure(
+	uplinkState *uplinkGatewayState,
+	networkName, reason string,
+	err error,
+) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	for _, current := range c.uplinks {
+		if current != uplinkState {
+			continue
+		}
+		if networkState := current.networks[networkName]; networkState != nil {
+			networkState.phase = uplinkGatewayNetworkFailed
+			networkState.reason = reason
+			networkState.message = err.Error()
+		}
+		return
+	}
+}
+
+func sortedLifecycleKeys(values map[string]uplinkGatewayNetworkLifecycle) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func isUplinkStateNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if apierrors.IsNotFound(err) {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		unwrapped := joined.Unwrap()
+		if len(unwrapped) == 0 {
+			return false
+		}
+		for _, nested := range unwrapped {
+			if !isUplinkStateNotFound(nested) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return isUplinkStateNotFound(wrapped.Unwrap())
+	}
+	return false
 }
 
 // DeleteGatewayState forgets all cached state for an Uplink resource that no
@@ -296,9 +660,12 @@ func (c *UplinkGatewayController) completeNetworkReconcile(
 	networkState := uplinkState.networks[network.GetNetworkName()]
 	if networkState != nil && networkState.generation == generation {
 		if reconcileErr == nil {
-			networkState.phase = uplinkGatewayNetworkReady
-			networkState.reason = uplinkv1alpha1.UplinkStateReasonGatewayConfigured
-			networkState.message = ""
+			if !uplinkState.invalidated {
+				networkState.phase = uplinkGatewayNetworkReady
+				networkState.reason = uplinkv1alpha1.UplinkStateReasonGatewayConfigured
+				networkState.message = ""
+				networkState.configuration = uplinkState.configuration
+			}
 		} else {
 			networkState.phase = uplinkGatewayNetworkFailed
 			networkState.reason = uplinkGatewayFailureReason(reconcileErr)
@@ -482,6 +849,14 @@ func (c *UplinkGatewayController) gatewayCondition(
 			}
 			examples = append(examples, example)
 		}
+	}
+	if incomplete == 0 && uplinkState.invalidated {
+		return metav1.Condition{
+			Type:    uplinkv1alpha1.UplinkStateConditionGatewayReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  uplinkv1alpha1.UplinkStateReasonGatewayConfigurationPending,
+			Message: "Uplink gateway lifecycle is awaiting fresh configuration",
+		}, true
 	}
 	if incomplete == 0 {
 		return metav1.Condition{
