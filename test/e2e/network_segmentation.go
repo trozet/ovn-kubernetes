@@ -2492,7 +2492,7 @@ spec:
 		)
 	})
 
-	It("should steer external ARP and NDP to the default GR and share its MAC bindings with CUDN GRs", func() {
+	It("should steer external ARP and NDP to the default GR and share a MAC binding scope with CUDN GRs", func() {
 		By("getting two nodes: a target node and a sender node")
 		nodes, err := e2enode.GetReadySchedulableNodes(context.TODO(), cs)
 		framework.ExpectNoError(err)
@@ -2565,27 +2565,93 @@ spec:
 		defaultGR := ovntypes.GWRouterPrefix + targetNode.Name
 		cudnExternalLRP := ovntypes.GWRouterToExtSwitchPrefix + cudnGR
 		defaultExternalLRP := ovntypes.GWRouterToExtSwitchPrefix + defaultGR
+		macBindingScopeName := ovntypes.MACBindingScopePrefix + targetNode.Name
 		framework.Logf("default patch port: %s, CUDN patch port: %s", defaultPatchPort, cudnPatchPort)
 
-		By("verifying the CUDN external router port uses the default GR MAC bindings")
-		Eventually(func() string {
-			out, _ := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-				fmt.Sprintf("ovn-nbctl get Logical_Router_Port %s options:mac-binding-source", cudnExternalLRP),
+		By("verifying the default and CUDN external router ports use the same MAC binding scope")
+		var nbScopeUUID string
+		Eventually(func() error {
+			out, err := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
+				fmt.Sprintf("ovn-nbctl --bare --columns=_uuid find MAC_Binding_Scope name=%q", macBindingScopeName),
 				framework.Poll, 30*time.Second)
-			return out
-		}, 60*time.Second, 5*time.Second).Should(ContainSubstring(defaultExternalLRP),
-			"CUDN external LRP %s must use %s as its MAC binding source",
-			cudnExternalLRP, defaultExternalLRP)
+			if err != nil {
+				return fmt.Errorf("finding NB MAC binding scope %s: %w", macBindingScopeName, err)
+			}
+			nbScopeUUID = strings.TrimSpace(out)
+			if nbScopeUUID == "" {
+				return fmt.Errorf("NB MAC binding scope %s does not exist", macBindingScopeName)
+			}
+			for _, lrp := range []string{defaultExternalLRP, cudnExternalLRP} {
+				out, err = e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
+					fmt.Sprintf("ovn-nbctl get Logical_Router_Port %s mac_binding_scope", lrp),
+					framework.Poll, 30*time.Second)
+				if err != nil {
+					return fmt.Errorf("getting MAC binding scope for LRP %s: %w", lrp, err)
+				}
+				if !strings.Contains(out, nbScopeUUID) {
+					return fmt.Errorf("LRP %s has scope %q, expected %s", lrp, strings.TrimSpace(out), nbScopeUUID)
+				}
+			}
+			return nil
+		}, 60*time.Second, 5*time.Second).Should(Succeed())
 
-		By("verifying OVN activated the shared MAC binding relationship")
-		Eventually(func() string {
-			out, _ := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-				fmt.Sprintf("ovn-sbctl get Port_Binding %s options:mac-binding-source", cudnExternalLRP),
+		By("verifying OVN activated the MAC binding scope in the southbound database")
+		var sbScopeUUID string
+		Eventually(func() error {
+			out, err := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
+				fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find MAC_Binding_Scope name=%q", macBindingScopeName),
 				framework.Poll, 30*time.Second)
-			return out
-		}, 60*time.Second, 5*time.Second).Should(ContainSubstring(defaultExternalLRP),
-			"OVN must publish %s as the MAC binding source for %s",
-			defaultExternalLRP, cudnExternalLRP)
+			if err != nil {
+				return fmt.Errorf("finding SB MAC binding scope %s: %w", macBindingScopeName, err)
+			}
+			sbScopeUUID = strings.TrimSpace(out)
+			if sbScopeUUID == "" {
+				return fmt.Errorf("SB MAC binding scope %s does not exist", macBindingScopeName)
+			}
+			for _, lrp := range []string{defaultExternalLRP, cudnExternalLRP} {
+				out, err = e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
+					fmt.Sprintf("ovn-sbctl get Port_Binding %s mac_binding_scope", lrp),
+					framework.Poll, 30*time.Second)
+				if err != nil {
+					return fmt.Errorf("getting MAC binding scope for port binding %s: %w", lrp, err)
+				}
+				if !strings.Contains(out, sbScopeUUID) {
+					return fmt.Errorf("port binding %s has scope %q, expected %s", lrp, strings.TrimSpace(out), sbScopeUUID)
+				}
+			}
+			return nil
+		}, 60*time.Second, 5*time.Second).Should(Succeed())
+
+		sharedBindingUsesCurrentScope := func(ip string, allowMissing bool) error {
+			out, err := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
+				fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find MAC_Binding_Scope name=%q", macBindingScopeName),
+				framework.Poll, 30*time.Second)
+			if err != nil {
+				return fmt.Errorf("finding SB MAC binding scope %s: %w", macBindingScopeName, err)
+			}
+			currentScopeUUID := strings.TrimSpace(out)
+			if currentScopeUUID == "" {
+				return fmt.Errorf("SB MAC binding scope %s does not exist", macBindingScopeName)
+			}
+
+			macBindings, err := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
+				fmt.Sprintf("ovn-sbctl --bare --columns=scope find Shared_MAC_Binding ip=\\\"%s\\\"", ip),
+				framework.Poll, 30*time.Second)
+			if err != nil {
+				return fmt.Errorf("finding shared MAC binding for %s: %w", ip, err)
+			}
+			scopes := strings.Fields(macBindings)
+			if allowMissing && len(scopes) == 0 {
+				return nil
+			}
+			if len(scopes) != 1 {
+				return fmt.Errorf("expected exactly one shared MAC binding for %s, got %d: %q", ip, len(scopes), macBindings)
+			}
+			if !strings.Contains(scopes[0], currentScopeUUID) {
+				return fmt.Errorf("shared MAC binding for %s uses scope %q, expected %s", ip, scopes[0], currentScopeUUID)
+			}
+			return nil
+		}
 
 		var defaultOfport, cudnOfport string
 		Eventually(func() error {
@@ -2746,23 +2812,23 @@ spec:
 		}
 
 		if hasIPv4 {
-			By("logging MAC_Bindings for sender IP before arping")
+			By("logging shared MAC bindings for sender IP before arping")
 			macBindingsBefore, err := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-				fmt.Sprintf("ovn-sbctl --columns=logical_port,ip find MAC_Binding ip=%q", senderNodeIPv4),
+				fmt.Sprintf("ovn-sbctl --columns=scope,ip find Shared_MAC_Binding ip=%q", senderNodeIPv4),
 				framework.Poll, 30*time.Second)
 			framework.ExpectNoError(err)
-			framework.Logf("MAC_Bindings for sender IP %s BEFORE arping:\n%s", senderNodeIPv4, macBindingsBefore)
+			framework.Logf("Shared MAC bindings for sender IP %s BEFORE arping:\n%s", senderNodeIPv4, macBindingsBefore)
 
-			By("clearing MAC_Bindings for sender IP to establish a clean baseline")
+			By("clearing shared MAC bindings for sender IP to establish a clean baseline")
 			_, _ = e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-				fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find MAC_Binding ip=%q | xargs -r -n1 ovn-sbctl destroy MAC_Binding", senderNodeIPv4),
+				fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find Shared_MAC_Binding ip=%q | xargs -r -n1 ovn-sbctl destroy Shared_MAC_Binding", senderNodeIPv4),
 				framework.Poll, 30*time.Second)
 			Eventually(func() string {
 				out, _ := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-					fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find MAC_Binding ip=%q", senderNodeIPv4),
+					fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find Shared_MAC_Binding ip=%q", senderNodeIPv4),
 					framework.Poll, 30*time.Second)
 				return strings.TrimSpace(out)
-			}, 10*time.Second, 2*time.Second).Should(BeEmpty(), "MAC_Bindings for %s should be cleared", senderNodeIPv4)
+			}, 10*time.Second, 2*time.Second).Should(BeEmpty(), "shared MAC bindings for %s should be cleared", senderNodeIPv4)
 
 			By("sending ARP for target node IP from sender node")
 			arpCmd := fmt.Sprintf("arping -c 3 -w 5 -I %s %s", bridgeName, targetNodeIPv4)
@@ -2772,76 +2838,60 @@ spec:
 			// With always_learn_from_arp_request=false, OVN northd generates
 			// a priority-110 exemption flow in lr_in_lookup_neighbor that
 			// hardcodes reg9[3]=1 for ARP requests targeting the router's own
-			// IP. This lets put_arp fire immediately, creating a MAC_Binding
+			// IP. This lets put_arp fire immediately, creating a shared MAC binding
 			// for the sender on the first poll.
-			By("verifying MAC_Bindings confirm priority-12 directed ARP to default GR only")
-			Consistently(func(g Gomega) {
-				macBindings, err := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-					fmt.Sprintf("ovn-sbctl --columns=logical_port find MAC_Binding ip=%q", senderNodeIPv4),
-					framework.Poll, 30*time.Second)
-				g.Expect(err).NotTo(HaveOccurred(), "ovn-sbctl find MAC_Binding failed")
-				framework.Logf("MAC_Bindings for sender IP %s AFTER arping:\n%s", senderNodeIPv4, macBindings)
-				g.Expect(macBindings).To(ContainSubstring(defaultGR),
-					"ARP must create a MAC_Binding on default GR %s for sender IP %s", defaultGR, senderNodeIPv4)
-				g.Expect(macBindings).NotTo(ContainSubstring(cudnGR),
-					"node-IP ARP must NOT create a MAC_Binding on CUDN GR %s for sender IP %s", cudnGR, senderNodeIPv4)
-			}, 4*time.Second, 1*time.Second).Should(Succeed())
+			By("verifying ARP creates exactly one binding in the shared scope")
+			Eventually(func() error {
+				return sharedBindingUsesCurrentScope(senderNodeIPv4, false)
+			}, 10*time.Second, 1*time.Second).Should(Succeed())
 
-			By("logging MAC_Bindings for sender IP before GARP test")
+			By("logging shared MAC bindings for sender IP before GARP test")
 			macBindingsBeforeGARP, err := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-				fmt.Sprintf("ovn-sbctl --columns=logical_port,ip find MAC_Binding ip=%q", senderNodeIPv4),
+				fmt.Sprintf("ovn-sbctl --columns=scope,ip find Shared_MAC_Binding ip=%q", senderNodeIPv4),
 				framework.Poll, 30*time.Second)
 			framework.ExpectNoError(err)
-			framework.Logf("MAC_Bindings for sender IP %s BEFORE GARP:\n%s", senderNodeIPv4, macBindingsBeforeGARP)
+			framework.Logf("Shared MAC bindings for sender IP %s BEFORE GARP:\n%s", senderNodeIPv4, macBindingsBeforeGARP)
 
-			By("clearing MAC_Bindings for sender IP before GARP test")
+			By("clearing shared MAC bindings for sender IP before GARP test")
 			_, _ = e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-				fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find MAC_Binding ip=%q | xargs -r -n1 ovn-sbctl destroy MAC_Binding", senderNodeIPv4),
+				fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find Shared_MAC_Binding ip=%q | xargs -r -n1 ovn-sbctl destroy Shared_MAC_Binding", senderNodeIPv4),
 				framework.Poll, 30*time.Second)
 			Eventually(func() string {
 				out, _ := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-					fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find MAC_Binding ip=%q", senderNodeIPv4),
+					fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find Shared_MAC_Binding ip=%q", senderNodeIPv4),
 					framework.Poll, 30*time.Second)
 				return strings.TrimSpace(out)
-			}, 10*time.Second, 2*time.Second).Should(BeEmpty(), "MAC_Bindings for %s should be cleared", senderNodeIPv4)
+			}, 10*time.Second, 2*time.Second).Should(BeEmpty(), "shared MAC bindings for %s should be cleared", senderNodeIPv4)
 
 			By("sending GARP from sender node to exercise the priority-45 steering flow")
 			garpCmd := fmt.Sprintf("arping -A -c 3 -w 5 -I %s %s", bridgeName, senderNodeIPv4)
 			_, err = e2epodoutput.RunHostCmdWithRetries(senderOvnkPod.Namespace, senderOvnkPod.Name, garpCmd, framework.Poll, 30*time.Second)
 			framework.ExpectNoError(err, "GARP from sender for %s failed", senderNodeIPv4)
 
-			By("verifying GARP updates only the shared default GR MAC binding")
-			Consistently(func(g Gomega) {
-				macBindings, err := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-					fmt.Sprintf("ovn-sbctl --columns=logical_port find MAC_Binding ip=%q", senderNodeIPv4),
-					framework.Poll, 30*time.Second)
-				g.Expect(err).NotTo(HaveOccurred(), "ovn-sbctl find MAC_Binding failed")
-				framework.Logf("MAC_Bindings for sender IP %s AFTER GARP:\n%s", senderNodeIPv4, macBindings)
-				g.Expect(macBindings).To(ContainSubstring(defaultGR),
-					"GARP must create a MAC_Binding on default GR %s for sender IP %s", defaultGR, senderNodeIPv4)
-				g.Expect(macBindings).NotTo(ContainSubstring(cudnGR),
-					"GARP must not create a duplicate MAC_Binding on CUDN GR %s for sender IP %s", cudnGR, senderNodeIPv4)
-			}, 4*time.Second, 1*time.Second).Should(Succeed())
+			By("verifying GARP updates the shared MAC binding scope")
+			Eventually(func() error {
+				return sharedBindingUsesCurrentScope(senderNodeIPv4, false)
+			}, 10*time.Second, 1*time.Second).Should(Succeed())
 		}
 
 		if hasIPv6 {
-			By("logging MAC_Bindings for sender IPv6 before NS test")
+			By("logging shared MAC bindings for sender IPv6 before NS test")
 			macBindingsV6Before, err := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-				fmt.Sprintf("ovn-sbctl --columns=logical_port,ip find MAC_Binding ip=\\\"%s\\\"", senderNodeIPv6),
+				fmt.Sprintf("ovn-sbctl --columns=scope,ip find Shared_MAC_Binding ip=\\\"%s\\\"", senderNodeIPv6),
 				framework.Poll, 30*time.Second)
 			framework.ExpectNoError(err)
-			framework.Logf("MAC_Bindings for sender IPv6 %s BEFORE ndisc6:\n%s", senderNodeIPv6, macBindingsV6Before)
+			framework.Logf("Shared MAC bindings for sender IPv6 %s BEFORE ndisc6:\n%s", senderNodeIPv6, macBindingsV6Before)
 
-			By("clearing MAC_Bindings for sender IPv6 before NS test")
+			By("clearing shared MAC bindings for sender IPv6 before NS test")
 			_, _ = e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-				fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find MAC_Binding ip=\\\"%s\\\" | xargs -r -n1 ovn-sbctl destroy MAC_Binding", senderNodeIPv6),
+				fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find Shared_MAC_Binding ip=\\\"%s\\\" | xargs -r -n1 ovn-sbctl destroy Shared_MAC_Binding", senderNodeIPv6),
 				framework.Poll, 30*time.Second)
 			Eventually(func() string {
 				out, _ := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-					fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find MAC_Binding ip=\\\"%s\\\"", senderNodeIPv6),
+					fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find Shared_MAC_Binding ip=\\\"%s\\\"", senderNodeIPv6),
 					framework.Poll, 30*time.Second)
 				return strings.TrimSpace(out)
-			}, 10*time.Second, 2*time.Second).Should(BeEmpty(), "MAC_Bindings for %s should be cleared", senderNodeIPv6)
+			}, 10*time.Second, 2*time.Second).Should(BeEmpty(), "shared MAC bindings for %s should be cleared", senderNodeIPv6)
 
 			By("sending NS for target node IPv6 from sender node using ndisc6 with global source")
 			nsCmd := fmt.Sprintf("ndisc6 -1 -r 3 -s %s %s %s", senderNodeIPv6, targetNodeIPv6, bridgeName)
@@ -2849,40 +2899,25 @@ spec:
 			framework.ExpectNoError(err, "ndisc6 NS from sender %s to target %s failed", senderNodeIPv6, targetNodeIPv6)
 			framework.Logf("ndisc6 output:\n%s", nsOut)
 
-			// TODO(OVN northd bug, https://redhat.atlassian.net/browse/FDP-4198):
-			// Unlike ARP requests, NS packets targeting the router's own
-			// IPv6 do NOT get a priority-110 exemption flow in
-			// lr_in_lookup_neighbor when always_learn_from_arp_request=false.
-			// The priority-110 flow (which hardcodes reg9[3]=1 to allow
-			// put_arp) is only generated for IPv4 addresses (n_ipv4_addrs
-			// loop in northd commit 61ccc6b). NS hits the generic
-			// priority-100 flow where reg9[3]=lookup_nd_ip()=0 (no
-			// pre-existing binding), causing the priority-100 skip
-			// condition in lr_in_learn_neighbor to fire. The GR responds
-			// with NA but never learns the sender's MAC/IP.
-			// Any MAC_Binding that appears after a longer delay is from
-			// background traffic triggering the GR's own NS resolution
-			// (via arp_request table), not from the test's ndisc6.
-			By("verifying NS does NOT immediately create a MAC_Binding (OVN northd IPv6 learning bug)")
-			Consistently(func() string {
-				macBindings, _ := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-					fmt.Sprintf("ovn-sbctl --bare --columns=logical_port find MAC_Binding ip=\\\"%s\\\"", senderNodeIPv6),
-					framework.Poll, 30*time.Second)
-				return strings.TrimSpace(macBindings)
-			}, 2*time.Second, 1*time.Second).Should(BeEmpty(),
-				"NS must NOT create a MAC_Binding due to OVN northd bug — always_learn_from_arp_request=false "+
-					"priority-110 exemption is missing for IPv6 NS (only implemented for IPv4 ARP)")
+			// OVN northd generates the same priority-110 learning exemption
+			// for NS targeting a router's IPv6 address as it does for ARP.
+			// This lets put_nd create a shared MAC binding immediately even when
+			// always_learn_from_arp_request=false.
+			By("verifying NS creates exactly one binding in the shared scope")
+			Eventually(func() error {
+				return sharedBindingUsesCurrentScope(senderNodeIPv6, false)
+			}, 10*time.Second, 1*time.Second).Should(Succeed())
 
-			By("clearing MAC_Bindings for sender IPv6 before unsolicited NA test")
+			By("clearing shared MAC bindings for sender IPv6 before unsolicited NA test")
 			_, _ = e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-				fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find MAC_Binding ip=\\\"%s\\\" | xargs -r -n1 ovn-sbctl destroy MAC_Binding", senderNodeIPv6),
+				fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find Shared_MAC_Binding ip=\\\"%s\\\" | xargs -r -n1 ovn-sbctl destroy Shared_MAC_Binding", senderNodeIPv6),
 				framework.Poll, 30*time.Second)
 			Eventually(func() string {
 				out, _ := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-					fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find MAC_Binding ip=\\\"%s\\\"", senderNodeIPv6),
+					fmt.Sprintf("ovn-sbctl --bare --columns=_uuid find Shared_MAC_Binding ip=\\\"%s\\\"", senderNodeIPv6),
 					framework.Poll, 30*time.Second)
 				return strings.TrimSpace(out)
-			}, 10*time.Second, 2*time.Second).Should(BeEmpty(), "MAC_Bindings for %s should be cleared", senderNodeIPv6)
+			}, 10*time.Second, 2*time.Second).Should(BeEmpty(), "shared MAC bindings for %s should be cleared", senderNodeIPv6)
 
 			// ndptool sends NAs with a link-local source IP. OVN's
 			// lr_in_lookup_neighbor has a priority-110 flow matching
@@ -2917,14 +2952,14 @@ spec:
 			}, 5*time.Second, 1*time.Second).ShouldNot(Equal(naFlowBefore),
 				"priority-52 NA flow counter must increment after ndptool NA")
 
-			By("verifying ndptool NA with link-local source does not create MAC_Bindings for global sender IPv6")
-			Consistently(func() string {
-				macBindings, _ := e2epodoutput.RunHostCmdWithRetries(ovnkPod.Namespace, ovnkPod.Name,
-					fmt.Sprintf("ovn-sbctl --bare --columns=logical_port find MAC_Binding ip=\\\"%s\\\"", senderNodeIPv6),
-					framework.Poll, 30*time.Second)
-				return strings.TrimSpace(macBindings)
-			}, 2*time.Second, 1*time.Second).Should(BeEmpty(),
-				"ndptool uses link-local source; no MAC_Binding should appear for global %s", senderNodeIPv6)
+			// Background neighbor discovery can recreate this node-IP binding
+			// after the explicit delete. Its presence is therefore not evidence
+			// that the link-local NA created it. If a binding is present, the
+			// invariant under test is that it belongs to the shared scope.
+			By("verifying any binding present after ndptool uses the shared scope")
+			Consistently(func() error {
+				return sharedBindingUsesCurrentScope(senderNodeIPv6, true)
+			}, 2*time.Second, 1*time.Second).Should(Succeed())
 		}
 	})
 })
