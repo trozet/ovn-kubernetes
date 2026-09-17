@@ -5,6 +5,7 @@ package node
 
 import (
 	"errors"
+	"net"
 	"testing"
 
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
@@ -173,6 +174,89 @@ func TestOpenFlowManagerDefaultTargetUsesDefaultBridgeSet(t *testing.T) {
 	}
 	if netConfig := ofm.externalGatewayBridge.GetNetworkConfig(types.DefaultNetworkName); netConfig != nil {
 		t.Fatalf("expected external gateway bridge network config to be removed")
+	}
+}
+
+func TestOpenFlowManagerAssociatesLocalnetNetworksByPhysicalNetwork(t *testing.T) {
+	if err := config.PrepareTestConfig(); err != nil {
+		t.Fatalf("failed to prepare test config: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = config.PrepareTestConfig()
+	})
+	config.IPv4Mode = true
+	config.IPv6Mode = false
+	config.Gateway.Mode = config.GatewayModeShared
+
+	defaultBridge := bridgeconfig.TestDefaultBridgeConfig()
+	externalBridge := bridgeconfig.TestBridgeConfigForPhysicalNetwork("br-exgw", "exgw-physnet")
+	uplinkBridge := bridgeconfig.TestBridgeConfigForPhysicalNetwork("br-uplink", "uplink-physnet")
+	ofUplinkBridge := newOpenflowBridge(uplinkBridge)
+	ofm := &openflowManager{
+		defaultBridge:         newOpenflowBridge(defaultBridge),
+		externalGatewayBridge: newOpenflowBridge(externalBridge),
+		uplinkBridges: map[string]*openflowBridge{
+			"br-uplink": ofUplinkBridge,
+		},
+		localnetNetworks: map[string]string{},
+	}
+
+	if !ofm.setLocalnetNetwork("localnet-a", types.PhysicalNetworkName) {
+		t.Fatal("expected default bridge localnet membership to change")
+	}
+	if !defaultBridge.HasLocalnetNetworks() {
+		t.Fatal("expected localnet network on the default bridge")
+	}
+	if externalBridge.HasLocalnetNetworks() || uplinkBridge.HasLocalnetNetworks() {
+		t.Fatal("expected other physical networks to remain without localnet networks")
+	}
+	ofm.updateLocalnetFlowCache([]*net.IPNet{ovntest.MustParseIPNet("10.128.0.0/23")})
+	if flows := ofm.defaultBridge.getFlowsByKey(localnetFlowCacheKey); len(flows) == 0 {
+		t.Fatal("expected localnet flows on the matching default bridge")
+	}
+	if flows := ofm.externalGatewayBridge.getFlowsByKey(localnetFlowCacheKey); len(flows) != 0 {
+		t.Fatalf("expected no localnet flows on the external gateway bridge, got %#v", flows)
+	}
+
+	ofm.setLocalnetNetwork("localnet-b", types.PhysicalNetworkName)
+	ofm.setLocalnetNetwork("localnet-a", "")
+	if !defaultBridge.HasLocalnetNetworks() {
+		t.Fatal("expected the second localnet network to keep default bridge membership")
+	}
+
+	ofm.setLocalnetNetwork("localnet-b", "uplink-physnet")
+	if defaultBridge.HasLocalnetNetworks() {
+		t.Fatal("expected moved localnet network to leave the default bridge")
+	}
+	if !uplinkBridge.HasLocalnetNetworks() {
+		t.Fatal("expected moved localnet network on the matching uplink bridge")
+	}
+	if externalBridge.HasLocalnetNetworks() {
+		t.Fatal("expected non-matching external gateway bridge to remain unchanged")
+	}
+
+	ofm.setLocalnetNetwork("localnet-b", "")
+	if uplinkBridge.HasLocalnetNetworks() {
+		t.Fatal("expected localnet deletion to clear uplink bridge membership")
+	}
+	ofm.updateLocalnetFlowCache([]*net.IPNet{ovntest.MustParseIPNet("10.128.0.0/23")})
+	if flows := ofm.defaultBridge.getFlowsByKey(localnetFlowCacheKey); len(flows) != 0 {
+		t.Fatalf("expected localnet flows to be removed from the default bridge, got %#v", flows)
+	}
+	if flows := ofUplinkBridge.getFlowsByKey(localnetFlowCacheKey); len(flows) != 0 {
+		t.Fatalf("expected localnet flows to be removed from the uplink bridge, got %#v", flows)
+	}
+
+	if ofm.setLocalnetNetwork("localnet-c", "future-physnet") {
+		t.Fatal("expected no bridge membership change before the matching bridge exists")
+	}
+	futureBridge := bridgeconfig.TestBridgeConfigForPhysicalNetwork("br-future", "future-physnet")
+	if err := ofm.addNetworkToUplinkBridge("br-future", futureBridge, &util.DefaultNetInfo{},
+		nil, nil, 0, 0, nil, nil); err != nil {
+		t.Fatalf("failed to add future uplink bridge: %v", err)
+	}
+	if !futureBridge.HasLocalnetNetworks() {
+		t.Fatal("expected a later bridge to inherit existing localnet association")
 	}
 }
 

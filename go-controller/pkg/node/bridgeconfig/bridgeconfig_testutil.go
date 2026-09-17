@@ -22,10 +22,11 @@ func TestDefaultBridgeConfig() *BridgeConfiguration {
 		OfPortPatch: "patch-breth0_ov",
 	}
 	return &BridgeConfiguration{
-		bridgeName: "breth0",
-		gwIface:    "breth0",
-		uplinkName: "eth0",
-		ofPortPhys: "eth0",
+		bridgeName:          "breth0",
+		physicalNetworkName: types.PhysicalNetworkName,
+		gwIface:             "breth0",
+		uplinkName:          "eth0",
+		ofPortPhys:          "eth0",
 		netConfig: map[string]*BridgeUDNConfiguration{
 			types.DefaultNetworkName: defaultNetConfig,
 		},
@@ -36,7 +37,16 @@ func TestBridgeConfig(brName string) *BridgeConfiguration {
 	return &BridgeConfiguration{
 		bridgeName: brName,
 		gwIface:    brName,
+		netConfig:  map[string]*BridgeUDNConfiguration{},
 	}
+}
+
+// TestBridgeConfigForPhysicalNetwork returns a minimal bridge configuration
+// associated with the given physical network for use by tests.
+func TestBridgeConfigForPhysicalNetwork(brName, physicalNetworkName string) *BridgeConfiguration {
+	bridge := TestBridgeConfig(brName)
+	bridge.physicalNetworkName = physicalNetworkName
+	return bridge
 }
 
 func TestBridgeConfigWithGatewayRepresentor(brName, gwIfaceRep string) *BridgeConfiguration {

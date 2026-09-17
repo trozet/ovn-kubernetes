@@ -44,6 +44,7 @@ type Gateway interface {
 	SetDefaultGatewayBridgeMAC(addr net.HardwareAddr)
 	SetDefaultPodNetworkAdvertised(bool)
 	SetDefaultBridgeGARPDropFlows(bool)
+	ReconcileLocalnetNetwork(string, string)
 	Reconcile() error
 }
 
@@ -58,6 +59,7 @@ type gateway struct {
 	nodePortWatcher      informer.ServiceAndEndpointsEventHandler
 	openflowManager      *openflowManager
 	nodeIPManager        *addressManager
+	localnetReconcileMu  sync.Mutex
 	bridgeEIPAddrManager *egressip.BridgeEIPAddrManager
 	initFunc             func() error
 	readyFunc            func() (bool, error)
@@ -534,6 +536,26 @@ func (g *gateway) SetDefaultBridgeGARPDropFlows(isDropped bool) {
 		return
 	}
 	g.openflowManager.setDefaultBridgeGARPDrop(isDropped)
+}
+
+// ReconcileLocalnetNetwork updates the physical network associated with a
+// localnet network and rebuilds bridge-learning flows when that changes the
+// localnet membership of a managed bridge. An empty physical network removes
+// the association.
+func (g *gateway) ReconcileLocalnetNetwork(networkName, physicalNetworkName string) {
+	g.localnetReconcileMu.Lock()
+	defer g.localnetReconcileMu.Unlock()
+
+	if g.openflowManager == nil {
+		return
+	}
+	changed := g.openflowManager.setLocalnetNetwork(networkName, physicalNetworkName)
+	if !changed || g.nodeIPManager == nil {
+		return
+	}
+	_, hostSubnets := g.nodeIPManager.ListAddresses()
+	g.openflowManager.updateLocalnetFlowCache(hostSubnets)
+	g.openflowManager.requestFlowSync()
 }
 
 // Reconcile handles triggering updates to different components of a gateway, like

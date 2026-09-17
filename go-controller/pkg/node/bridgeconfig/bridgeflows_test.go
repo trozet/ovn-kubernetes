@@ -77,6 +77,49 @@ func TestSharedNoOverlayNodeIPFlowUsesNATInDefaultConntrackZone(t *testing.T) {
 	expectFlow(t, flows, expectedIPv6)
 }
 
+func TestLocalnetFlowsRequireNetworkMappedToBridge(t *testing.T) {
+	if err := config.PrepareTestConfig(); err != nil {
+		t.Fatalf("failed to prepare test config: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = config.PrepareTestConfig()
+	})
+	config.IPv4Mode = true
+	config.IPv6Mode = false
+	config.Gateway.Mode = config.GatewayModeShared
+
+	bridge := &BridgeConfiguration{
+		physicalNetworkName: types.PhysicalNetworkName,
+		ofPortPhys:          "eth0",
+		macAddress:          mustParseMAC(t, "62:41:d0:54:3d:64"),
+		netConfig: map[string]*BridgeUDNConfiguration{
+			types.DefaultNetworkName: {
+				OfPortPatch: "patch-breth0_ov",
+				MasqCTMark:  nodetypes.CtMarkOVN,
+			},
+		},
+	}
+	hostSubnets := []*net.IPNet{mustParseIPNet(t, "10.128.0.0/23")}
+
+	expectNoFlow(t, bridge.LocalnetFlows(hostSubnets), "priority=102")
+
+	if !bridge.SetLocalnetNetwork("localnet-a", true) {
+		t.Fatal("expected first localnet network to change bridge membership")
+	}
+	flows := bridge.LocalnetFlows(hostSubnets)
+	expectFlowContainingAll(t, flows,
+		"priority=102", "in_port=patch-breth0_ov", "nw_dst=10.128.0.0/23", "output:NORMAL")
+	expectFlowContainingAll(t, flows,
+		"priority=102", "in_port=LOCAL", "nw_dst=10.128.0.0/23", "output:NORMAL")
+
+	bridge.SetLocalnetNetwork("localnet-b", true)
+	bridge.SetLocalnetNetwork("localnet-a", false)
+	expectFlowContainingAll(t, bridge.LocalnetFlows(hostSubnets), "priority=102")
+
+	bridge.SetLocalnetNetwork("localnet-b", false)
+	expectNoFlow(t, bridge.LocalnetFlows(hostSubnets), "priority=102")
+}
+
 func TestUplinkBridgeServiceFlowsUseUDNMark(t *testing.T) {
 	if err := config.PrepareTestConfig(); err != nil {
 		t.Fatalf("failed to prepare test config: %v", err)

@@ -30,6 +30,10 @@ type openflowManager struct {
 	externalGatewayBridge *openflowBridge
 	uplinkBridgesMu       sync.Mutex
 	uplinkBridges         map[string]*openflowBridge
+	// localnetNetworks maps localnet network names to physical network names.
+	// It is protected by uplinkBridgesMu so bridge creation and association
+	// updates are serialized.
+	localnetNetworks map[string]string
 	// channel to indicate we need to update flows immediately
 	flowChan  chan struct{}
 	ovsClient libovsdbclient.Client
@@ -50,6 +54,8 @@ type openflowBridge struct {
 // It means the default bridge and, when configured, the external gateway bridge.
 // Its length prevents it from colliding with a Linux interface name.
 const defaultOpenFlowBridgeSetName = "<default-bridge-set>"
+
+const localnetFlowCacheKey = "LOCALNET"
 
 func openflowBridgeTargetDisplayName(targetName string) string {
 	if targetName == defaultOpenFlowBridgeSetName {
@@ -150,6 +156,10 @@ func (c *openflowManager) addNetworkToUplinkBridge(bridgeName string, bridge *br
 	if !found {
 		uplinkBridge = newOpenflowBridge(bridge)
 		c.uplinkBridges[bridgeName] = uplinkBridge
+	}
+	for networkName, physicalNetworkName := range c.localnetNetworks {
+		uplinkBridge.SetLocalnetNetwork(networkName,
+			physicalNetworkName == uplinkBridge.GetPhysicalNetworkName())
 	}
 	return uplinkBridge.AddNetworkConfig(nInfo, nodeSubnets, mgmtIPs, masqCTMark, pktMark, v6MasqIPs, v4MasqIPs)
 }
@@ -283,6 +293,35 @@ func (c *openflowManager) getActiveNetwork(nInfo util.NetInfo) *bridgeconfig.Bri
 		return nil
 	})
 	return netConfig
+}
+
+// setLocalnetNetwork associates a localnet network with the managed bridge for
+// its physical network. An empty physical network removes the association. It
+// reports whether the localnet membership of any managed bridge changed.
+func (c *openflowManager) setLocalnetNetwork(networkName, physicalNetworkName string) bool {
+	c.uplinkBridgesMu.Lock()
+	defer c.uplinkBridgesMu.Unlock()
+
+	if c.localnetNetworks == nil {
+		c.localnetNetworks = map[string]string{}
+	}
+	if physicalNetworkName == "" {
+		delete(c.localnetNetworks, networkName)
+	} else {
+		c.localnetNetworks[networkName] = physicalNetworkName
+	}
+
+	changed := c.defaultBridge.SetLocalnetNetwork(networkName,
+		physicalNetworkName != "" && physicalNetworkName == c.defaultBridge.GetPhysicalNetworkName())
+	if c.externalGatewayBridge != nil {
+		changed = c.externalGatewayBridge.SetLocalnetNetwork(networkName,
+			physicalNetworkName != "" && physicalNetworkName == c.externalGatewayBridge.GetPhysicalNetworkName()) || changed
+	}
+	for _, bridge := range c.uplinkBridges {
+		changed = bridge.SetLocalnetNetwork(networkName,
+			physicalNetworkName != "" && physicalNetworkName == bridge.GetPhysicalNetworkName()) || changed
+	}
+	return changed
 }
 
 // END UDN UTILs
@@ -587,10 +626,11 @@ func newGatewayOpenFlowManager(gwBridge, exGWBridge *bridgeconfig.BridgeConfigur
 	}
 	// add health check function to check default OpenFlow flows are on the shared gateway bridge
 	ofm := &openflowManager{
-		defaultBridge: newOpenflowBridge(gwBridge),
-		uplinkBridges: map[string]*openflowBridge{},
-		flowChan:      make(chan struct{}, 1),
-		ovsClient:     ovsClient,
+		defaultBridge:    newOpenflowBridge(gwBridge),
+		uplinkBridges:    map[string]*openflowBridge{},
+		localnetNetworks: map[string]string{},
+		flowChan:         make(chan struct{}, 1),
+		ovsClient:        ovsClient,
 	}
 	if exGWBridge != nil {
 		ofm.externalGatewayBridge = newOpenflowBridge(exGWBridge)
@@ -660,6 +700,18 @@ func (c *openflowManager) updateBridgePMTUDFlowCache(key string, ipAddrs []strin
 	})
 }
 
+func (c *openflowManager) updateLocalnetFlowCache(hostSubnets []*net.IPNet) {
+	c.defaultBridge.updateFlowCacheEntry(localnetFlowCacheKey, c.defaultBridge.LocalnetFlows(hostSubnets))
+	if c.externalGatewayBridge != nil {
+		c.externalGatewayBridge.updateFlowCacheEntry(localnetFlowCacheKey,
+			c.externalGatewayBridge.LocalnetFlows(hostSubnets))
+	}
+	_ = c.forEachUplinkBridge(func(_ string, bridge *openflowBridge) error {
+		bridge.updateFlowCacheEntry(localnetFlowCacheKey, bridge.LocalnetFlows(hostSubnets))
+		return nil
+	})
+}
+
 // updateBridgeFlowCache generates the "static" per-bridge flows
 // note: this is shared between shared and local gateway modes
 func (c *openflowManager) updateBridgeFlowCache(hostIPs []net.IP, hostSubnets []*net.IPNet) error {
@@ -684,7 +736,7 @@ func (c *openflowManager) updateBridgeFlowCache(hostIPs []net.IP, hostSubnets []
 		c.updateExBridgeFlowCacheEntry("NORMAL", []string{fmt.Sprintf("table=0,priority=0,actions=%s\n", util.NormalAction)})
 		c.updateExBridgeFlowCacheEntry("DEFAULT", exGWBridgeDftFlows)
 	}
-	return c.forEachUplinkBridge(func(_ string, bridge *openflowBridge) error {
+	if err := c.forEachUplinkBridge(func(_ string, bridge *openflowBridge) error {
 		uplinkBridgeDftFlows, err := bridge.UplinkBridgeFlows(hostSubnets)
 		if err != nil {
 			return err
@@ -692,7 +744,11 @@ func (c *openflowManager) updateBridgeFlowCache(hostIPs []net.IP, hostSubnets []
 		bridge.updateFlowCacheEntry("NORMAL", []string{fmt.Sprintf("table=0,priority=0,actions=%s\n", util.NormalAction)})
 		bridge.updateFlowCacheEntry("DEFAULT", uplinkBridgeDftFlows)
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	c.updateLocalnetFlowCache(hostSubnets)
+	return nil
 }
 
 // getOfport returns the current ofport of the given OVS interface as a string,

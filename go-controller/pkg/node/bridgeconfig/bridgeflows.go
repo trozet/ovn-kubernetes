@@ -63,6 +63,31 @@ func (b *BridgeConfiguration) UplinkBridgeFlows(hostSubnets []*net.IPNet) ([]str
 	return append(uplinkFlows, commonFlows...), nil
 }
 
+// LocalnetFlows returns flows that use bridge learning to reach localnet
+// endpoints directly attached to this bridge.
+func (b *BridgeConfiguration) LocalnetFlows(hostSubnets []*net.IPNet) []string {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	if len(b.localnetNetworks) == 0 || b.ofPortPhys == "" ||
+		(config.Gateway.Mode != config.GatewayModeShared && config.Gateway.Mode != config.GatewayModeLocal) {
+		return nil
+	}
+	netConfig := b.netConfig[types.DefaultNetworkName]
+	if netConfig == nil || netConfig.OfPortPatch == "" {
+		return nil
+	}
+
+	var flows []string
+	if config.IPv4Mode {
+		flows = append(flows, hostNetworkNormalActionFlows(netConfig, b.macAddress.String(), hostSubnets, false)...)
+	}
+	if config.IPv6Mode {
+		flows = append(flows, hostNetworkNormalActionFlows(netConfig, b.macAddress.String(), hostSubnets, true)...)
+	}
+	return flows
+}
+
 // must be called with bridge.mutex held
 func (b *BridgeConfiguration) flowsForDefaultBridge(extraIPs []net.IP) ([]string, error) {
 	// CAUTION: when adding new flows where the in_port is ofPortPatch and the out_port is ofPortPhys, ensure
@@ -893,11 +918,6 @@ func (b *BridgeConfiguration) commonFlows(hostSubnets []*net.IPNet) ([]string, e
 							nodetypes.DefaultOpenFlowCookie, netConfig.OfPortPatch, bridgeMacAddress, protoPrefixV4,
 							config.Default.ConntrackZone, netConfig.MasqCTMark, ofPortPhys))
 
-					// Allow (a) OVN->host traffic on the same node
-					// (b) host->host traffic on the same node
-					if config.Gateway.Mode == config.GatewayModeShared || config.Gateway.Mode == config.GatewayModeLocal {
-						dftFlows = append(dftFlows, hostNetworkNormalActionFlows(netConfig, bridgeMacAddress, hostSubnets, false)...)
-					}
 				} else {
 					//  for UDN we additionally SNAT the packet from masquerade IP -> node IP
 					dftFlows = append(dftFlows,
@@ -1010,11 +1030,6 @@ func (b *BridgeConfiguration) commonFlows(hostSubnets []*net.IPNet) ([]string, e
 							nodetypes.DefaultOpenFlowCookie, netConfig.OfPortPatch, bridgeMacAddress, protoPrefixV6,
 							config.Default.ConntrackZone, netConfig.MasqCTMark, ofPortPhys))
 
-					// Allow (a) OVN->host traffic on the same node
-					// (b) host->host traffic on the same node
-					if config.Gateway.Mode == config.GatewayModeShared || config.Gateway.Mode == config.GatewayModeLocal {
-						dftFlows = append(dftFlows, hostNetworkNormalActionFlows(netConfig, bridgeMacAddress, hostSubnets, true)...)
-					}
 				} else {
 					//  for UDN we additionally SNAT the packet from masquerade IP -> node IP
 					dftFlows = append(dftFlows,
@@ -1425,9 +1440,9 @@ func getIPv(ipnet *net.IPNet) string {
 // hostNetworkNormalActionFlows returns the flows that allow IP{v4,v6} traffic:
 // a. from pods in the OVN network to pods in a localnet network, on the same node
 // b. from pods on the host to pods in a localnet network, on the same node
-// when the localnet is mapped to breth0.
-// The expected srcMAC is the MAC address of breth0 and the expected hostSubnets is the host subnets found on the node
-// primary interface.
+// when the localnet is mapped to the bridge being programmed. The expected
+// srcMAC is that bridge's MAC and hostSubnets contains the subnets found on the
+// node primary interface.
 func hostNetworkNormalActionFlows(netConfig *BridgeUDNConfiguration, srcMAC string, hostSubnets []*net.IPNet, isV6 bool) []string {
 	var flows []string
 	var ipFamily, ipFamilyDest string

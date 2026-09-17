@@ -726,8 +726,18 @@ func checkForStaleOVSInternalPorts() {
 	}
 }
 
-// Reconcile implements networkmanager.ControllerManager. Uplink gateway status
-// is reported by the UDN controller after its dataplane operation completes.
-func (ncm *NodeControllerManager) Reconcile(_ string, _, _ util.NetInfo) error {
+// Reconcile implements networkmanager.ControllerManager. Localnet network
+// changes update the bridge-learning flows on the bridge mapped to their
+// physical network. Uplink gateway status is reported by the UDN controller
+// after its dataplane operation completes.
+func (ncm *NodeControllerManager) Reconcile(name string, _, new util.NetInfo) error {
+	physicalNetworkName := ""
+	if new != nil && new.TopologyType() == ovntypes.LocalnetTopology {
+		physicalNetworkName = new.PhysicalNetworkName()
+		if physicalNetworkName == "" {
+			physicalNetworkName = new.GetNetworkName()
+		}
+	}
+	ncm.defaultNodeNetworkController.Gateway.ReconcileLocalnetNetwork(name, physicalNetworkName)
 	return nil
 }

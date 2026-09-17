@@ -92,8 +92,11 @@ type BridgeConfiguration struct {
 	ovsClient  libovsdbclient.Client
 	nodeName   string
 	bridgeName string
-	uplinkName string
-	gwIface    string
+	// physicalNetworkName identifies the ovn-bridge-mappings entry for this
+	// bridge.
+	physicalNetworkName string
+	uplinkName          string
+	gwIface             string
 	// gwIfaceRep is the OVS representor port for the gateway MAC when one exists.
 	// In DPU mode this is the host representor. In accelerated full mode this is
 	// the representor of the configured gateway VF/SF.
@@ -106,8 +109,11 @@ type BridgeConfiguration struct {
 	macAddress net.HardwareAddr
 	ofPortPhys string
 	netConfig  map[string]*BridgeUDNConfiguration
-	eipMarkIPs *egressip.MarkIPsCache
-	dropGARP   bool
+	// localnetNetworks contains localnet networks whose physical network maps
+	// directly to this bridge.
+	localnetNetworks map[string]struct{}
+	eipMarkIPs       *egressip.MarkIPsCache
+	dropGARP         bool
 }
 
 func NewBridgeConfiguration(ovsClient libovsdbclient.Client, intfName, nodeName,
@@ -128,12 +134,14 @@ func NewBridgeConfiguration(ovsClient libovsdbclient.Client, intfName, nodeName,
 		defaultNetConfig.ManagementIPs = append(defaultNetConfig.ManagementIPs, util.GetNodeManagementIfAddr(subnet))
 	}
 	res := BridgeConfiguration{
-		ovsClient: ovsClient,
-		nodeName:  nodeName,
+		ovsClient:           ovsClient,
+		nodeName:            nodeName,
+		physicalNetworkName: physicalNetworkName,
 		netConfig: map[string]*BridgeUDNConfiguration{
 			types.DefaultNetworkName: defaultNetConfig,
 		},
-		eipMarkIPs: egressip.NewMarkIPsCache(),
+		localnetNetworks: map[string]struct{}{},
+		eipMarkIPs:       egressip.NewMarkIPsCache(),
 	}
 	res.netConfig[types.DefaultNetworkName].Advertised.Store(advertised)
 
@@ -354,16 +362,18 @@ func NewUnmanagedBridgeConfiguration(ovsClient libovsdbclient.Client, bridgeName
 	}
 
 	return &BridgeConfiguration{
-		nodeName:    nodeName,
-		bridgeName:  bridgeName,
-		uplinkName:  uplinkName,
-		gwIface:     gwIface,
-		gwIfaceRep:  gwIfaceRep,
-		interfaceID: interfaceID,
-		ips:         gwIPs,
-		macAddress:  macAddress,
-		netConfig:   map[string]*BridgeUDNConfiguration{},
-		eipMarkIPs:  egressip.NewMarkIPsCache(),
+		nodeName:            nodeName,
+		bridgeName:          bridgeName,
+		physicalNetworkName: physicalNetworkName,
+		uplinkName:          uplinkName,
+		gwIface:             gwIface,
+		gwIfaceRep:          gwIfaceRep,
+		interfaceID:         interfaceID,
+		ips:                 gwIPs,
+		macAddress:          macAddress,
+		netConfig:           map[string]*BridgeUDNConfiguration{},
+		localnetNetworks:    map[string]struct{}{},
+		eipMarkIPs:          egressip.NewMarkIPsCache(),
 	}, nil
 }
 
@@ -595,6 +605,42 @@ func (b *BridgeConfiguration) GetIPs() []*net.IPNet {
 
 func (b *BridgeConfiguration) GetBridgeName() string {
 	return b.bridgeName
+}
+
+// GetPhysicalNetworkName returns the physical network mapped to this bridge.
+func (b *BridgeConfiguration) GetPhysicalNetworkName() string {
+	return b.physicalNetworkName
+}
+
+// SetLocalnetNetwork records whether a localnet network maps to this bridge and
+// reports whether the bridge's localnet membership changed.
+func (b *BridgeConfiguration) SetLocalnetNetwork(networkName string, present bool) bool {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	_, found := b.localnetNetworks[networkName]
+	if present {
+		if found {
+			return false
+		}
+		if b.localnetNetworks == nil {
+			b.localnetNetworks = map[string]struct{}{}
+		}
+		b.localnetNetworks[networkName] = struct{}{}
+		return true
+	}
+	if !found {
+		return false
+	}
+	delete(b.localnetNetworks, networkName)
+	return true
+}
+
+// HasLocalnetNetworks reports whether any localnet network maps to this bridge.
+func (b *BridgeConfiguration) HasLocalnetNetworks() bool {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return len(b.localnetNetworks) > 0
 }
 
 func (b *BridgeConfiguration) GetUplinkName() string {
