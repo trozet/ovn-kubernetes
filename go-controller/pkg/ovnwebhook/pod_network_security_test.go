@@ -17,7 +17,7 @@ import (
 )
 
 func TestPodNetworkAnnotationCreate(t *testing.T) {
-	validator := NewPodAdmissionWebhook(nil, nil)
+	validator := NewPodAdmissionWebhook(nil, nil, nil)
 	for _, tc := range []struct {
 		name        string
 		annotations map[string]string
@@ -38,7 +38,7 @@ func TestPodNetworkAnnotationCreate(t *testing.T) {
 }
 
 func TestPodNetworkAnnotationUpdate(t *testing.T) {
-	validator := NewPodAdmissionWebhook(nil, nil)
+	validator := NewPodAdmissionWebhook(nil, nil, nil)
 	for _, subresource := range []string{"", "status"} {
 		for _, tc := range []struct {
 			name     string

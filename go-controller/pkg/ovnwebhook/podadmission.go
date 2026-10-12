@@ -10,9 +10,11 @@ import (
 	"os"
 
 	"golang.org/x/exp/maps"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	listers "k8s.io/client-go/listers/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -102,26 +104,28 @@ type PodAdmission struct {
 	annotations       map[string]checkPodAnnot
 	annotationKeys    sets.Set[string]
 	extraAllowedUsers sets.Set[string]
+	kubeVirtUsers     sets.Set[string]
 	podAdmissions     []PodAdmissionConditionOption
 }
 
-func NewPodAdmissionWebhook(nodeLister listers.NodeLister, podAdmissions []PodAdmissionConditionOption, extraAllowedUsers ...string) *PodAdmission {
+func NewPodAdmissionWebhook(nodeLister listers.NodeLister, podAdmissions []PodAdmissionConditionOption, kubeVirtUsers []string, extraAllowedUsers ...string) *PodAdmission {
 	return &PodAdmission{
 		nodeLister:        nodeLister,
 		annotations:       interconnectPodAnnotations,
 		annotationKeys:    sets.New[string](maps.Keys(interconnectPodAnnotations)...),
 		extraAllowedUsers: sets.New[string](extraAllowedUsers...),
+		kubeVirtUsers:     sets.New[string](kubeVirtUsers...),
 		podAdmissions:     podAdmissions,
 	}
 }
 
-func (p PodAdmission) ValidateCreate(_ context.Context, pod *corev1.Pod) (warnings admission.Warnings, err error) {
+func (p PodAdmission) ValidateCreate(ctx context.Context, pod *corev1.Pod) (warnings admission.Warnings, err error) {
 	// Allocation results are written by the network controllers after creation.
 	// No creator, including a controller copying a pod template, may supply them.
 	if _, present := pod.Annotations[types.OvnPodAnnotationName]; present {
 		return nil, fmt.Errorf("annotation %s must not be supplied on pod creation", types.OvnPodAnnotationName)
 	}
-	return nil, nil
+	return nil, p.validateKubeVirtMetadata(ctx, &corev1.Pod{}, pod)
 }
 
 func (p PodAdmission) ValidateDelete(_ context.Context, _ *corev1.Pod) (warnings admission.Warnings, err error) {
@@ -135,6 +139,9 @@ func (p PodAdmission) ValidateUpdate(ctx context.Context, oldPod, newPod *corev1
 
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := p.validateKubeVirtMetadata(ctx, oldPod, newPod); err != nil {
 		return nil, err
 	}
 	isOVNKubeNode, podAdmission, nodeName := checkNodeIdentity(p.podAdmissions, req.UserInfo)
@@ -215,4 +222,55 @@ func (p PodAdmission) ValidateUpdate(ctx context.Context, oldPod, newPod *corev1
 	}
 
 	return nil, nil
+}
+
+// These fields select the source allocation and control migration routing. They
+// are authored by KubeVirt on pods, not by VM users directly. In particular, an
+// owner reference is only trustworthy when its writer is authenticated too.
+var kubeVirtNetworkAnnotations = sets.New(
+	kubevirtv1.DomainAnnotation,
+	kubevirtv1.AllowPodBridgeNetworkLiveMigrationAnnotation,
+	kubevirtv1.MigrationTargetReadyTimestamp,
+)
+var kubeVirtNetworkLabels = sets.New(
+	kubevirtv1.VirtualMachineNameLabel,
+	kubevirtv1.NodeNameLabel,
+)
+
+func (p PodAdmission) validateKubeVirtMetadata(ctx context.Context, oldPod, newPod *corev1.Pod) error {
+	protectedChange := kubeVirtNetworkAnnotations.HasAny(maps.Keys(mapDiff(oldPod.Annotations, newPod.Annotations))...) ||
+		kubeVirtNetworkLabels.HasAny(maps.Keys(mapDiff(oldPod.Labels, newPod.Labels))...)
+	oldLauncher := kubevirt.IsPodOwnedByVirtualMachine(oldPod)
+	newLauncher := kubevirt.IsPodOwnedByVirtualMachine(newPod)
+	protectedChange = protectedChange || oldLauncher != newLauncher
+	// Garbage collection may remove ownership or clear blockOwnerDeletion.
+	// Only adopting or reassigning a launcher changes its asserted identity.
+	oldOwner, newOwner := metav1.GetControllerOf(oldPod), metav1.GetControllerOf(newPod)
+	if (oldLauncher || newLauncher) && newOwner != nil &&
+		(oldOwner == nil || oldOwner.APIVersion != newOwner.APIVersion || oldOwner.Kind != newOwner.Kind ||
+			oldOwner.Name != newOwner.Name || oldOwner.UID != newOwner.UID) {
+		protectedChange = true
+	}
+	if !protectedChange {
+		return nil
+	}
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	if !p.kubeVirtUsers.Has(req.UserInfo.Username) {
+		return fmt.Errorf("user %q is not allowed to modify KubeVirt network identity or migration metadata on pod %q", req.UserInfo.Username, newPod.Name)
+	}
+	if newLauncher || kubevirt.IsPodLiveMigratable(newPod) {
+		owner := metav1.GetControllerOf(newPod)
+		if owner == nil || owner.APIVersion != kubevirtv1.SchemeGroupVersion.String() || owner.Kind != "VirtualMachineInstance" || owner.UID == "" || owner.Name == "" {
+			return fmt.Errorf("KubeVirt pod %q must have a VirtualMachineInstance controller owner", newPod.Name)
+		}
+		// KubeVirt copies user VMI annotations onto pods. Do not allow a copied
+		// domain annotation to select a different VMI's allocation.
+		if newPod.Annotations[kubevirtv1.DomainAnnotation] != owner.Name {
+			return fmt.Errorf("KubeVirt pod %q domain annotation must match its VirtualMachineInstance controller owner", newPod.Name)
+		}
+	}
+	return nil
 }
