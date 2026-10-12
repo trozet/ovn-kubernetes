@@ -115,13 +115,17 @@ func NewPodAdmissionWebhook(nodeLister listers.NodeLister, podAdmissions []PodAd
 	}
 }
 
-func (p PodAdmission) ValidateCreate(_ context.Context, _ *corev1.Pod) (warnings admission.Warnings, err error) {
-	// Ignore creation, the webhook is configured to only handle pod/status updates
+func (p PodAdmission) ValidateCreate(_ context.Context, pod *corev1.Pod) (warnings admission.Warnings, err error) {
+	// Allocation results are written by the network controllers after creation.
+	// No creator, including a controller copying a pod template, may supply them.
+	if _, present := pod.Annotations[types.OvnPodAnnotationName]; present {
+		return nil, fmt.Errorf("annotation %s must not be supplied on pod creation", types.OvnPodAnnotationName)
+	}
 	return nil, nil
 }
 
 func (p PodAdmission) ValidateDelete(_ context.Context, _ *corev1.Pod) (warnings admission.Warnings, err error) {
-	// Ignore creation, the webhook is configured to only handle pod/status updates
+	// Pod deletion does not introduce or modify network configuration.
 	return nil, nil
 }
 
@@ -196,16 +200,17 @@ func (p PodAdmission) ValidateUpdate(ctx context.Context, oldPod, newPod *corev1
 	}
 
 	// Verify that nothing but the annotations changed.
-	// Since ovnkube-node only has the pod/status permissions, it is enough to check .Status and .ObjectMeta only.
+	// Check Spec as well because the webhook also handles the main pod resource.
 	// Ignore .ManagedFields fields which are modified on every update.
-	oldPodShallowCopy := oldPod
-	newPodShallowCopy := newPod
+	oldPodShallowCopy := oldPod.DeepCopy()
+	newPodShallowCopy := newPod.DeepCopy()
 	oldPodShallowCopy.Annotations = nil
 	newPodShallowCopy.Annotations = nil
 	oldPodShallowCopy.ManagedFields = nil
 	newPodShallowCopy.ManagedFields = nil
 	if !apiequality.Semantic.DeepEqual(oldPodShallowCopy.ObjectMeta, newPodShallowCopy.ObjectMeta) ||
-		!apiequality.Semantic.DeepEqual(oldPodShallowCopy.Status, newPodShallowCopy.Status) {
+		!apiequality.Semantic.DeepEqual(oldPodShallowCopy.Status, newPodShallowCopy.Status) ||
+		!apiequality.Semantic.DeepEqual(oldPodShallowCopy.Spec, newPodShallowCopy.Spec) {
 		return nil, fmt.Errorf("%s on node: %q is not allowed to modify anything other than annotations", prefixName, nodeName)
 	}
 

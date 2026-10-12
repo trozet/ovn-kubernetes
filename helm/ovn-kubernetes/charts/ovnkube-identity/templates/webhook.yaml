@@ -46,11 +46,11 @@ webhooks:
     sideEffects: None
     matchConditions:
       - name: skip-ovnkube-identity-self-pods
-        expression: '!(request.namespace == "ovn-kubernetes" && has(object.metadata.labels) && "name" in object.metadata.labels && object.metadata.labels["name"] == "ovnkube-identity")'
+        expression: '!(request.namespace == "ovn-kubernetes" && has(object.metadata.labels) && "name" in object.metadata.labels && object.metadata.labels["name"] == "ovnkube-identity" && (!has(object.metadata.annotations) || !("k8s.ovn.org/pod-networks" in object.metadata.annotations)) && (oldObject == null || !has(oldObject.metadata.annotations) || !("k8s.ovn.org/pod-networks" in oldObject.metadata.annotations)))'
     rules:
-      - operations: [ "UPDATE" ]
+      - operations: [ "CREATE", "UPDATE" ]
         apiGroups: ["*"]
         apiVersions: ["*"]
-        resources: ["pods/status"] # Using /status subresource doesn't protect from other users changing the annotations
+        resources: ["pods", "pods/status"]
         scope: "*"
 {{- end }}

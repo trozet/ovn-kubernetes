@@ -48,8 +48,21 @@ This is intentional as it helps ensure that the certificate rotation works seaml
 
 ## Validating Admission Webhook
 
-The feature introduces a validating webhook for updates to `pod/status` and `node/status`.\
-The `ovnkube-node` pod exclusively updates the status on both resources, so it is sufficient to verify only update requests.\
+The feature introduces a validating webhook for pod creation, updates to `pods` and
+`pods/status`, and updates to `nodes/status`.
+
+`k8s.ovn.org/pod-networks` is controller-generated allocation output. It must not
+be supplied on pod creation, including in workload templates or restored pod
+manifests. After creation, only authorized network identities may modify or remove
+it. Unrelated pod updates may retain the annotation unchanged. Static address
+requests and IPAM claim references remain supported through network selection
+inputs; controllers populate the allocation result afterward. KubeVirt migration
+likewise copies the source allocation onto the target pod after creation.
+
+Deployments supplying their own webhook configuration must register both pod
+resources and the CREATE/UPDATE operations; updating the webhook binary alone does
+not extend admission coverage. These protections require the webhook to be enabled.
+
 The webhooks include the following checks for each `ovnkube-node` pod:
 - Modifying annotations on pods hosted on its own node.
 - Modifying annotations on its own node.
