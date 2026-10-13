@@ -209,15 +209,15 @@ func (p PodAdmission) ValidateUpdate(ctx context.Context, oldPod, newPod *corev1
 	// Verify that nothing but the annotations changed.
 	// Check Spec as well because the webhook also handles the main pod resource.
 	// Ignore .ManagedFields fields which are modified on every update.
-	oldPodShallowCopy := oldPod.DeepCopy()
-	newPodShallowCopy := newPod.DeepCopy()
-	oldPodShallowCopy.Annotations = nil
-	newPodShallowCopy.Annotations = nil
-	oldPodShallowCopy.ManagedFields = nil
-	newPodShallowCopy.ManagedFields = nil
-	if !apiequality.Semantic.DeepEqual(oldPodShallowCopy.ObjectMeta, newPodShallowCopy.ObjectMeta) ||
-		!apiequality.Semantic.DeepEqual(oldPodShallowCopy.Status, newPodShallowCopy.Status) ||
-		!apiequality.Semantic.DeepEqual(oldPodShallowCopy.Spec, newPodShallowCopy.Spec) {
+	oldPodCopy := oldPod.DeepCopy()
+	newPodCopy := newPod.DeepCopy()
+	oldPodCopy.Annotations = nil
+	newPodCopy.Annotations = nil
+	oldPodCopy.ManagedFields = nil
+	newPodCopy.ManagedFields = nil
+	if !apiequality.Semantic.DeepEqual(oldPodCopy.ObjectMeta, newPodCopy.ObjectMeta) ||
+		!apiequality.Semantic.DeepEqual(oldPodCopy.Status, newPodCopy.Status) ||
+		!apiequality.Semantic.DeepEqual(oldPodCopy.Spec, newPodCopy.Spec) {
 		return nil, fmt.Errorf("%s on node: %q is not allowed to modify anything other than annotations", prefixName, nodeName)
 	}
 

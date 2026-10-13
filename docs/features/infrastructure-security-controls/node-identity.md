@@ -125,4 +125,9 @@ These checks apply to admission requests, not retroactively to existing pods.
 Audit existing pods for forged allocation or migration metadata when enabling the
 policy. Custom webhook manifests must retain admission coverage for these fields,
 including any self-pod exclusions, and configure the trusted KubeVirt users before
-starting or migrating VMs.
+starting or migrating VMs. Downstream deployments that do not use this Helm
+chart must configure both `CREATE` and `UPDATE` admission for `pods` and
+`pods/status`, preserve the protected-metadata checks in self-pod exclusions,
+and explicitly supply their KubeVirt controller service-account usernames.
+The username identifies the authenticated API caller, not the service account
+assigned to the workload pod.

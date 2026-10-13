@@ -45,6 +45,10 @@ webhooks:
     admissionReviewVersions: ['v1']
     sideEffects: None
     matchConditions:
+      # Avoid a bootstrap dependency on the identity webhook for its own pods.
+      # Skip only when neither the old nor the new pod has protected metadata;
+      # adding, removing, or retaining it must still invoke admission, even if
+      # the caller supplies the identity pod label.
       - name: skip-ovnkube-identity-self-pods
         expression: >-
           !(request.namespace == "ovn-kubernetes" && has(object.metadata.labels) &&

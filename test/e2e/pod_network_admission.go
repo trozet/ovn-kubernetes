@@ -5,6 +5,7 @@ package e2e
 
 import (
 	"context"
+	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -21,14 +22,17 @@ import (
 var _ = ginkgo.Describe("Pod network annotation admission", func() {
 	f := wrappedTestFramework("pod-network-admission")
 	ginkgo.BeforeEach(func() {
-		_, err := f.ClientSet.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.Background(), "ovn-kubernetes-admission-webhook-pod", metav1.GetOptions{})
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		_, err := f.ClientSet.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(ctx, "ovn-kubernetes-admission-webhook-pod", metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			ginkgo.Skip("requires the OVN pod admission webhook")
 		}
 		framework.ExpectNoError(err)
 	})
 	ginkgo.It("rejects supplied allocation results on creation and updates", func() {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
 		pods := f.ClientSet.CoreV1().Pods(f.Namespace.Name)
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "annotation-test", Annotations: map[string]string{OvnPodAnnotationName: ""}}, Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "test", Image: images.AgnHost()}},
@@ -51,7 +55,8 @@ var _ = ginkgo.Describe("Pod network annotation admission", func() {
 		framework.ExpectNoError(err)
 	})
 	ginkgo.It("rejects forged KubeVirt identity without an allocation annotation", func() {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
 		pods := f.ClientSet.CoreV1().Pods(f.Namespace.Name)
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:        "fake-launcher",

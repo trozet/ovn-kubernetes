@@ -63,6 +63,7 @@ func TestPodWebhookSelfExclusion(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			forged := pod(self, map[string]string{key: ""})
 			evaluate(t, forged, nil, true)
+			evaluate(t, forged, forged, true)
 			evaluate(t, pod(self, nil), forged, true)
 		})
 	}
@@ -70,6 +71,7 @@ func TestPodWebhookSelfExclusion(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			forged := pod(map[string]string{"name": "ovnkube-identity", key: "virt-launcher"}, nil)
 			evaluate(t, forged, nil, true)
+			evaluate(t, forged, forged, true)
 			evaluate(t, pod(self, nil), forged, true)
 		})
 	}
