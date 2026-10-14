@@ -484,6 +484,9 @@ func TestPodAllocator_reconcileForNAD(t *testing.T) {
 						Name:      "claim",
 						Namespace: "namespace",
 					},
+					Spec: ipamclaimsapi.IPAMClaimSpec{
+						Network: "nad",
+					},
 					Status: ipamclaimsapi.IPAMClaimStatus{
 						IPs: []string{"192.168.200.80/24"},
 					},
@@ -507,6 +510,9 @@ func TestPodAllocator_reconcileForNAD(t *testing.T) {
 						Name:      "claim",
 						Namespace: "namespace",
 					},
+					Spec: ipamclaimsapi.IPAMClaimSpec{
+						Network: "nad",
+					},
 					Status: ipamclaimsapi.IPAMClaimStatus{
 						IPs: []string{"192.168.200.80/24"},
 					},
@@ -514,6 +520,62 @@ func TestPodAllocator_reconcileForNAD(t *testing.T) {
 				release: true,
 			},
 			ipam:            true,
+			expectIDRelease: true,
+		},
+		{
+			name: "Pod on network, persistent IP requested, IPAMClaim belongs to another network",
+			args: args{
+				new: &testPod{
+					scheduled: true,
+					network: &nadapi.NetworkSelectionElement{
+						Name:               "nad",
+						Namespace:          "namespace",
+						IPAMClaimReference: "claim",
+					},
+				},
+				ipamClaim: &ipamclaimsapi.IPAMClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "claim",
+						Namespace: "namespace",
+					},
+					Spec: ipamclaimsapi.IPAMClaimSpec{
+						Network: "other-network",
+					},
+					Status: ipamclaimsapi.IPAMClaimStatus{
+						IPs: []string{"192.168.200.80/24"},
+					},
+				},
+			},
+			ipam:         true,
+			expectError:  "failed to update pod namespace/pod: error retrieving IPAMClaim for pod namespace/pod: IPAMClaim namespace/claim: ignored IPAMClaim: it belongs to other network",
+			expectEvents: []string{"Warning ErrorAllocatingPod failed to update pod namespace/pod: error retrieving IPAMClaim for pod namespace/pod: IPAMClaim namespace/claim: ignored IPAMClaim: it belongs to other network"},
+		},
+		{
+			name: "Pod deleted, persistent IPs requested *but* IPAMClaim belongs to another network, IP released",
+			args: args{
+				old: &testPod{
+					scheduled: true,
+					network: &nadapi.NetworkSelectionElement{
+						Name:               "nad",
+						IPAMClaimReference: "claim",
+					},
+				},
+				ipamClaim: &ipamclaimsapi.IPAMClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "claim",
+						Namespace: "namespace",
+					},
+					Spec: ipamclaimsapi.IPAMClaimSpec{
+						Network: "other-network",
+					},
+					Status: ipamclaimsapi.IPAMClaimStatus{
+						IPs: []string{"192.168.200.80/24"},
+					},
+				},
+				release: true,
+			},
+			ipam:            true,
+			expectIPRelease: true,
 			expectIDRelease: true,
 		},
 		{
@@ -530,6 +592,9 @@ func TestPodAllocator_reconcileForNAD(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "claim",
 						Namespace: "namespace",
+					},
+					Spec: ipamclaimsapi.IPAMClaimSpec{
+						Network: "nad",
 					},
 					Status: ipamclaimsapi.IPAMClaimStatus{},
 				},
