@@ -1,6 +1,7 @@
 name: DPU Offload
 
 on:
+  merge_group:
   pull_request:
     branches: [ master, release-* ]
     paths-ignore:
