@@ -973,6 +973,40 @@ jobs:
         name: kind-ovndbs-${{ env.JOB_NAME }}-${{ github.run_id }}
         path: /tmp/kind/ovndbs
 
+  ci-summary:
+    name: CI Summary
+    if: always()
+    runs-on: ubuntu-24.04
+    needs:
+      - changes
+      - go-cache
+      - verify-lint-generated-code
+      - build-base
+      - build-pr
+      - build-pr-ubuntu
+      - test-pr
+      - ovn-upgrade-e2e
+      - e2e
+      - e2e-dual-conversion
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+        sparse-checkout: .github/scripts
+    - name: Check required CI results
+      uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+      env:
+        CI_NEEDS: ${{ toJSON(needs) }}
+      with:
+        script: |
+          const summarize = require('./.github/scripts/ci-summary.js');
+          const failures = summarize({
+            needs: JSON.parse(process.env.CI_NEEDS),
+            eventName: context.eventName,
+            skippedOnSchedule: ['ovn-upgrade-e2e', 'e2e-dual-conversion'],
+          });
+          if (failures.length) core.setFailed(failures.join('\n'));
+
   coredump-stacktraces:
     name: Collect coredump stack traces
     if: always() && contains(needs.*.result, 'failure')
